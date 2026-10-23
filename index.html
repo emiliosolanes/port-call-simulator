@@ -2946,7 +2946,7 @@ if (typeof module !== 'undefined') module.exports = GEODATA;
 
   // ======================================================================= camera views
   const VIEWS = {
-    approach: () => { const p = off(8800, 1600); return { target: [p[0], 0, p[1]], off: [-GEO.SEA_DIR[0] * 21000, 23000, -GEO.SEA_DIR[1] * 21000] }; },
+    approach: () => { const p = off(14200, 1800); return { target: [p[0], 0, p[1]], off: [-GEO.SEA_DIR[0] * 25000, 27500, -GEO.SEA_DIR[1] * 25000] }; },
     terminal: () => ({ target: [60, 0, 2120], off: [-1550, 1650, 1950] }),
     quay: () => {
       const s = state.sel; let q = 'Q', sq = 2005;
