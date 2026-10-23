@@ -1,0 +1,151 @@
+<title>ECT Delta Port Calls</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<meta name="author" content="Emilio Solanes">
+<meta name="description" content="Discrete event simulation of vessel calls at Hutchison Ports ECT Delta, Rotterdam, with every port call service exchanged as DCSA Port Call 2.0 events (Estimated, Requested, Planned, Actual).">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Instrument+Sans:wght@400;500;600&display=swap">
+<style>
+/*STYLES*/
+</style>
+
+<div id="app">
+  <section id="stage" aria-label="3D view of the port">
+    <canvas id="gl"></canvas>
+    <div id="labels"></div>
+    <div id="credit">by emilio.solanes</div>
+
+    <div id="brand" class="hud">
+      <div class="eyebrow">Hutchison Ports ECT Delta · Rotterdam</div>
+      <h1>Port call ops</h1>
+      <div id="clock"><span class="d" id="clock-d">Tue 20 Oct</span><span class="t" id="clock-t">10:20</span></div>
+      <div class="tag"><i></i>Simulated · DCSA Port Call 2.0 events</div>
+    </div>
+
+    <div id="views" class="hud" role="group" aria-label="Camera view">
+      <button type="button" data-view="approach" aria-pressed="false">Approach</button>
+      <button type="button" data-view="terminal" aria-pressed="true">Terminal</button>
+      <button type="button" data-view="quay" aria-pressed="false">Quay</button>
+    </div>
+  </section>
+
+  <div id="card" class="hud" hidden aria-live="polite"></div>
+
+  <section id="bottom" aria-label="Timeline">
+    <div class="panel">
+      <div class="controls">
+        <button id="play" type="button" aria-label="Pause"></button>
+        <div class="speed" role="group" aria-label="Simulation speed">
+          <button type="button" data-speed="2" aria-pressed="false">2 min/s</button>
+          <button type="button" data-speed="10" aria-pressed="true">10 min/s</button>
+          <button type="button" data-speed="30" aria-pressed="false">30 min/s</button>
+          <button type="button" data-speed="90" aria-pressed="false">90 min/s</button>
+        </div>
+        <div class="moments" id="moments" aria-label="Key moments"></div>
+      </div>
+      <div class="gantt" id="gantt"></div>
+      <div class="legend" style="margin-top:8px">
+        <span><i style="background:var(--g-naut)"></i>Pilotage and towage</span>
+        <span><i style="background:var(--g-anch)"></i>At anchor</span>
+        <span><i style="background:var(--g-berth)"></i>Alongside</span>
+        <span><i style="background:var(--g-cargo)"></i>Cargo operations</span>
+        <span><i style="background:var(--crit)"></i>Cranes stopped</span>
+        <span><i style="border:1.5px solid var(--p);transform:rotate(45deg);width:7px;height:7px"></i>Planned berth arrival</span>
+      </div>
+    </div>
+  </section>
+
+  <aside id="side" aria-label="Live panels">
+    <div class="panel" id="p-vessels">
+      <header><h3>Vessel calls</h3><span class="meta" id="v-meta"></span></header>
+      <div class="vlist" id="vlist"></div>
+    </div>
+
+    <div class="panel" id="p-jit">
+      <header><h3>JIT exchange</h3><span class="meta">Port Call 2.0 events</span></header>
+      <div class="stats">
+        <div class="stat"><div class="v" id="j-sent">0</div><div class="k">events in the last 24 h</div></div>
+        <div class="stat"><div class="v" id="j-open">0</div><div class="k">waiting for a plan</div></div>
+        <div class="stat"><div class="v" id="j-acc">0<small>min</small></div><div class="k" id="j-acc-k">last ATA vs PTA</div></div>
+      </div>
+      <div class="erpa-bar" id="j-bar"></div>
+      <div class="legend" id="j-legend"></div>
+      <div class="outcomes" id="j-out"></div>
+    </div>
+
+    <div class="panel" id="p-quay">
+      <header><h3>Quay</h3><span class="meta" id="q-meta"></span></header>
+      <div class="stats">
+        <div class="stat"><div class="v" id="q-cranes">0</div><div class="k">cranes working</div></div>
+        <div class="stat"><div class="v" id="q-rate">0</div><div class="k">moves per hour</div></div>
+        <div class="stat"><div class="v" id="q-moves">0</div><div class="k">moves since 00:00</div></div>
+      </div>
+      <div class="quay" id="q-strip" aria-hidden="true"></div>
+      <div class="spark" id="q-spark" aria-label="Moves per hour, last 24 hours"></div>
+      <div class="legend" style="margin-top:4px"><span>Moves per hour, last 24 h</span></div>
+    </div>
+
+    <div class="panel" id="p-naut">
+      <header><h3>Nautical services</h3><span class="meta">Pilots · tugs · linesmen</span></header>
+      <div class="rows" id="n-rows"></div>
+    </div>
+
+    <div class="panel" id="p-people">
+      <header><h3>People on the job</h3><span class="meta" id="pp-meta"></span></header>
+      <div class="rows" id="pp-rows"></div>
+    </div>
+
+    <div class="panel" id="p-alerts">
+      <header><h3>Alerts</h3><span class="meta">Latest first</span></header>
+      <div class="alerts" id="alerts"></div>
+    </div>
+
+    <div class="panel" id="p-feed">
+      <header><h3>Event stream</h3><span class="meta">Tap an event for its payload</span></header>
+      <div class="feed" id="feed"></div>
+    </div>
+
+    <div class="panel">
+      <details class="about">
+        <summary>About this model</summary>
+        <p>Personal project by emilio.solanes. Not affiliated with or endorsed by the companies mentioned.</p>
+        <p>A discrete event simulation of 48 hours at Hutchison Ports ECT Delta on Maasvlakte I. Vessels, pilots, the pilot helicopter, tugs, mooring crews, quay cranes, AGVs and stacking cranes share one event engine. The engine runs once per disruption, so every revised estimate comes from the same model as the actuals.</p>
+        <ul>
+          <li>Service codes, event types (ARRI, DEPA, STRT, CMPL), phases (INBD, ALGS, OUTB) and classifiers (EST, REQ, PLN, ACT) follow DCSA Port Call 2.0. Senders and receivers follow its use cases.</li>
+          <li>MSC Gülsün and MSC Irina are real MSC vessels; Lion and Britannia are MSC services that call Rotterdam. Their particulars are public. Which terminal and berth they use, schedules, voyages, moves and all timestamps are simulated.</li>
+          <li>Feeders Nordic Tern, Humber Gull, Baltic Wren and Kattegat Eider are fictional.</li>
+          <li>The map is drawn from OpenStreetMap: in through the Maasmond, down the Beerkanaal, swing in the turning basin and astern into the Amazonehaven. The view is rotated so the quay runs across the screen, and offshore distances along the Maasgeul are compressed. Deep-draught vessels take the pilot by helicopter before the Eurogeul; others board at Maascenter.</li>
+          <li>ECT Delta as Hutchison Ports publishes it: 272 ha and 4.0 km of quay on the Europahaven and Amazonehaven, 16.65 m water depth, separate feeder and barge facilities, two rail terminals. The stacking crane blocks are drawn where OpenStreetMap maps their rails.</li>
+          <li>The ULCS quay on the Amazonehaven gets 11 remote-operated cranes: 8 delivered in 2014 and 2015 and 3 in 2025. Crane count per quay, 23 gross moves per hour, 6 AGVs per crane and the 3 cranes at the Delta Barge Feeder Terminal are assumptions. The western end of the quay is shown but not modelled.</li>
+          <li>ATA berth is first line ashore. All fast follows when mooring completes.</li>
+          <li>Scope: one terminal. The rest of the port is not modelled, so there is no competition from other terminals' calls for pilots, tugs, linesmen or the fairway. The Port of Rotterdam handled 27,384 seagoing calls in 2025.</li>
+          <li>Not modelled: SHORE_POWER, SAFETY, ANCHORAGE_OPERATIONS, shifting between berths, cancel, omit and decline.</li>
+        </ul>
+        <p>Map data &copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap contributors</a>, ODbL.</p>
+        <p>Sources: <a href="https://reference.dcsa.org/content/standards/releases/port-call/v2-0-0/port-call-v2-0-0-use-cases" target="_blank" rel="noopener">DCSA Port Call 2.0 use cases</a>, <a href="https://app.swaggerhub.com/apis/dcsaorg/DCSA_PORT_CALL/2.0.0" target="_blank" rel="noopener">Port Call 2.0 API</a>, <a href="https://www.ect.nl/en/terminals/hutchison-ports-ect-delta" target="_blank" rel="noopener">Hutchison Ports ECT Delta</a>, <a href="https://www.marinelink.com/news/terminal-receives393089" target="_blank" rel="noopener">ECT Delta cranes 2014 and 2015</a>, <a href="https://myterminal.ect.nl/news/three-new-quay-cranes-ect-delta-terminal" target="_blank" rel="noopener">ECT Delta cranes 2025</a>, <a href="https://binnenvaartkrant.nl/hutchison-helpt-msc-aan-eigen-terminal-in-rotterdam" target="_blank" rel="noopener">MSC at ECT Delta</a>, <a href="https://www.msc.com/en/newsroom/customer-advisories/2025/october/port-rotation-changes-trade-far-east-nwc" target="_blank" rel="noopener">MSC Lion and Britannia rotations</a>, <a href="https://en.wikipedia.org/wiki/G%C3%BCls%C3%BCn-class_container_ship" target="_blank" rel="noopener">MSC Gülsün</a>, <a href="https://www.themeditelegraph.com/en/shipping/shipowners/2023/03/14/news/msc_shatters_records_with_delivery_of_24346_teu_msc_irina-12693791/" target="_blank" rel="noopener">MSC Irina</a>, <a href="https://en.wikipedia.org/wiki/Maascenter" target="_blank" rel="noopener">Maascenter</a>, <a href="https://ship.energy/policy/ports/port-of-rotterdam-records-dip-in-seagoing-vessel-calls-in-2025/" target="_blank" rel="noopener">Rotterdam calls in 2025</a>.</p>
+      </details>
+    </div>
+  </aside>
+</div>
+
+<div id="json" hidden role="dialog" aria-modal="false" aria-labelledby="json-title">
+  <header>
+    <h3 id="json-title">Event</h3>
+    <div style="display:flex;gap:6px"><button class="btn" type="button" id="json-copy">Copy</button><button class="btn" type="button" id="json-close" aria-label="Close">Close</button></div>
+    <div class="sub" id="json-sub"></div>
+  </header>
+  <div class="req" id="json-req"></div>
+  <pre id="json-pre"></pre>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<script>
+/*SIM*/
+</script>
+<script>
+/*GEO*/
+</script>
+<script>
+/*APP*/
+</script>
