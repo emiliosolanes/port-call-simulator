@@ -312,3 +312,18 @@ details.about a { color: var(--ink); }
 @media (prefers-reduced-motion: reduce) {
   * { scroll-behavior: auto !important; }
 }
+
+/* port switch: Rotterdam and the next port */
+#ports { display: flex; gap: 2px; padding: 3px; margin: 2px 0 8px; border-radius: 9px; background: var(--panel-2); width: max-content; max-width: 100%; }
+#ports button { position: relative; border: 0; background: transparent; padding: 5px 14px 6px 10px; border-radius: 7px; font-size: 12.5px; font-weight: 600; cursor: pointer; color: var(--muted); text-align: left; line-height: 1.15; }
+#ports button small { display: block; font-size: 10.5px; font-weight: 500; opacity: .8; }
+#ports button[aria-pressed="true"] { background: var(--ink); color: var(--panel); }
+#ports button:hover:not([aria-pressed="true"]) { color: var(--ink); }
+#ports button.news::after { content: ""; position: absolute; top: 4px; right: 3px; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 2px var(--panel-2); }
+.outcome.info { box-shadow: inset 0 3px 0 var(--g-naut); }
+.outcome.wide { grid-column: 1 / -1; }
+.g-port { font: 600 9.5px/1 var(--font-mono); letter-spacing: .04em; color: var(--panel); background: var(--g-naut); border-radius: 3px; padding: 2px 3px; margin-right: 5px; vertical-align: 1px; }
+.moments button.next { border-color: color-mix(in srgb, var(--g-naut) 60%, var(--line)); }
+.feed .tagp { font-style: normal; font: 600 9.5px/1 var(--font-mono); color: var(--muted); border: 1px solid var(--line); border-radius: 3px; padding: 1px 3px; margin-left: 4px; }
+.lbl.vessel.ghost { opacity: .85; border-style: dashed; }
+@media (max-width: 600px) { #ports button small { display: none; } #ports { margin-bottom: 6px; } }

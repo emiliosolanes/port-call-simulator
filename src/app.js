@@ -1,7 +1,7 @@
 (() => {
   'use strict';
   const S = SIM.build();
-  const { GEO, CALLS, CRANES, DISRUPTIONS, WINDOW, PARTIES, SVC, ORDER } = SIM;
+  const { GEO, GEO_ANR, PORTS, CALLS, CRANES, DISRUPTIONS, WINDOW, PARTIES, SVC, ORDER } = SIM;
   const { hhmm, parseKey, codeName, rowLabel } = SIM;
   const CALL = SIM.callById;
   const TAU = Math.PI * 2;
@@ -13,12 +13,20 @@
   const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   const fmtN = (n) => Math.round(n).toLocaleString('en-GB');
   const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-  const SHORT = { MSC: 'MSC', ECT: 'ECT Delta', PORT: 'Harbour Master', PILOT: 'Pilots', TUG: 'Boluda', MOOR: 'KRVE', BUNK: 'Bunker supplier', SLDG: 'Sludge barge', LASH: 'Lashing' };
+  const SHORT = { MSC: 'MSC', ECT: 'ECT Delta', PORT: 'Harbour Master', PILOT: 'Pilots', TUG: 'Boluda', MOOR: 'KRVE', BUNK: 'Bunker supplier', SLDG: 'Sludge barge', LASH: 'Lashing',
+    MPET: 'MPET', PORTA: 'Harbour Master', PILOTA: 'Pilots', TUGA: 'Tugs', MOORA: 'Brabo' };
+  const GP = { RTM: GEO, ANR: GEO_ANR };
+  const PORT_UI = {
+    RTM: { eyebrow: 'Hutchison Ports ECT Delta · Rotterdam', name: 'Rotterdam', short: 'ECT Delta' },
+    ANR: { eyebrow: 'MSC PSA European Terminal · Antwerp', name: 'Antwerp', short: 'MPET' },
+  };
   const dayTime = (t) => `${SIM.dayName(t)} ${hhmm(t)}`;
   const cellTime = (v, tNow) => (SIM.dayIdx(v) === SIM.dayIdx(tNow) ? hhmm(v) : `${SIM.dayName(v).slice(0, 2)} ${hhmm(v)}`);
   const hrs = (min) => (min / 60).toFixed(1);
 
-  const state = { t: 600, playing: !reduceMotion, speed: 10, sel: null, follow: false, view: 'terminal', openKey: null };
+  const state = { t: 600, playing: !reduceMotion, speed: 10, sel: null, follow: false, view: 'terminal', openKey: null, port: 'RTM' };
+  const NEXT = CALLS.find((c) => c.prevCall); // the next-port call (MSC Gülsün at Antwerp, after Rotterdam)
+  const PREV = NEXT ? CALL[NEXT.prevCall] : null;
 
   // ======================================================================= data helpers
   const msgsBy = {};
@@ -40,10 +48,12 @@
     return { x: lerp(a.x, b.x, u), z: lerp(a.z, b.z, u), h: a.h + dh * u, moving: Math.hypot(b.x - a.x, b.z - a.z) > 1 || Math.abs(dh) > 0.01 };
   }
   const vesselAt = (id, t) => trackAt(S.tracks[id], t);
-  const inHarbour = (p) => Math.hypot(p.x - 1500, p.z - 2300) < 5200;
-  const nearQuay = (p) => (p.x > -420 && p.x < 260 && p.z > -100 && p.z < 2800) || Math.hypot(p.x - 260, p.z - 2820) < 420;
+  const portAt = (x) => (x > 200000 ? 'ANR' : 'RTM'); // the two ports sit 400 km apart in one scene
+  const inHarbour = (p) => (portAt(p.x) === 'ANR' ? Math.hypot(p.x - 399900, p.z - 2400) < 5500 : Math.hypot(p.x - 1500, p.z - 2300) < 5200);
+  const nearQuay = (p) => (portAt(p.x) === 'ANR' ? p.x > 399350 && p.x < 400260 && p.z > -300 && p.z < 3300 : (p.x > -420 && p.x < 260 && p.z > -100 && p.z < 2800) || Math.hypot(p.x - 260, p.z - 2820) < 420);
   const viewFor = (p) => (nearQuay(p) ? 'quay' : inHarbour(p) ? 'terminal' : 'approach');
   const qp = GEO.qp, QUAYS = GEO.QUAYS;
+  const DUR_APPROACH = 150;
   const l2w = (p, lx, lz) => { const c = Math.cos(p.h), s = Math.sin(p.h); return [p.x + lx * c + lz * s, p.z - lx * s + lz * c]; };
 
   const craneById = Object.fromEntries(CRANES.map((k) => [k.id, k]));
@@ -67,24 +77,33 @@
     return { z, state: 'work', m: 0, a };
   }
   const allAssign = []; for (const id in S.craneTracks) allAssign.push(...S.craneTracks[id].assign);
-  const cumMoves = (t) => allAssign.reduce((s, a) => s + assignMoves(a, t), 0);
+  const cumMoves = (t, port) => allAssign.reduce((s, a) => s + (!port || CALL[a.call].port === port ? assignMoves(a, t) : 0), 0);
   const callMoves = (cid, t) => (S.cargo[cid] ? S.cargo[cid].cranes.reduce((s, a) => s + assignMoves(a, t), 0) : 0);
   const callTotal = (c) => c.moves.dis + c.moves.rst + c.moves.load;
   // hourly bins from -24 h to +48 h
-  const HB0 = -1440, hourly = new Array(72 + 2).fill(0);
+  const HB0 = -1440, hourlyP = { RTM: new Array(72 + 2).fill(0), ANR: new Array(72 + 2).fill(0) };
   for (const a of allAssign) for (const s of a.segs) {
-    if (s.kind === 'STOP' || s.t1 <= s.t0) continue; const rate = (s.m1 - s.m0) / (s.t1 - s.t0);
+    if (s.kind === 'STOP' || s.t1 <= s.t0) continue; const rate = (s.m1 - s.m0) / (s.t1 - s.t0); const hourly = hourlyP[CALL[a.call].port];
     for (let h = Math.floor((s.t0 - HB0) / 60); h <= Math.floor((s.t1 - HB0) / 60); h++) { const h0 = HB0 + h * 60, h1 = h0 + 60; const ov = Math.min(s.t1, h1) - Math.max(s.t0, h0); if (ov > 0 && h >= 0 && h < hourly.length) hourly[h] += ov * rate; }
   }
+  // messages per port; the Antwerp stream also carries the previous port's departure estimates for the same ship
+  const MSG_PORT = { RTM: S.messages.filter((m) => CALL[m.call].port === 'RTM'), ANR: S.messages.filter((m) => CALL[m.call].port === 'ANR') };
+  const FEED = { RTM: MSG_PORT.RTM, ANR: S.messages.filter((m) => CALL[m.call].port === 'ANR' || (PREV && m.call === PREV.id && /^(BERTH\|DEPA\|OUTB|SEA_PASSAGE\|STRT\|OUTB)$/.test(m.key))) };
+  const countTo = (list, t) => { let lo = 0, hi = list.length; while (lo < hi) { const mid = (lo + hi) >> 1; if (list[mid].sendAt <= t) lo = mid + 1; else hi = mid; } return lo; };
 
   function stopFor(c, t) {
-    for (const d of DISRUPTIONS) if (t >= d.start && t < d.end && (d.cranes === 'ALL' || c.cranes.some((k) => d.cranes.includes(k)))) {
+    for (const d of DISRUPTIONS) if (d.port === c.port && t >= d.start && t < d.end && (d.cranes === 'ALL' || c.cranes.some((k) => d.cranes.includes(k)))) {
       const A = S.times[c.id]; if (t >= A['CARGO_OPERATIONS|STRT|ALGS'] && t < A['CARGO_OPERATIONS|CMPL|ALGS']) return d;
     }
     return null;
   }
   function callStatus(c, t) {
     const A = S.times[c.id]; const tr = S.tracks[c.id];
+    if (c.prevCall) {
+      const P = S.times[c.prevCall];
+      if (t < P['SEA_PASSAGE|STRT|OUTB']) return { code: 'prev', label: `In ${PORTS[CALL[c.prevCall].port].name}`, cls: '' };
+      if (t < A['SEA_PASSAGE|CMPL|INBD']) { const sl = S.slowSteam[c.id]; return { code: 'sea', label: sl && t < sl.to - DUR_APPROACH ? 'Slow steaming for the tide' : 'At sea, inbound', cls: '' }; }
+    }
     if (t < tr[0].t) return { code: 'exp', label: 'Expected', cls: '' };
     if (A['ANCHORAGE|ARRI|'] !== undefined && t >= A['ANCHORAGE|ARRI|'] && t < A['ANCHORAGE|DEPA|']) return { code: 'anch', label: 'At anchor', cls: 'anch' };
     if (t < A['SEA_PASSAGE|CMPL|INBD']) return { code: 'sea', label: c.jit ? 'Slow steaming' : 'At sea, inbound', cls: '' };
@@ -111,20 +130,46 @@
 
   // ======================================================================= alerts and key moments
   const T = S.times;
+  // each alert belongs to a port; `also` lists the other ports it matters to (shown there with the port name in front)
   const ALERTS = [];
-  for (const d of DISRUPTIONS) ALERTS.push({ t: d.start, end: d.end, sev: d.kind === 'wind' ? 'crit' : 'warn', title: d.title, text: d.detail });
   for (const d of DISRUPTIONS) {
-    const rev = S.messages.filter((m) => m.revision === d.id && m.cls === 'EST');
-    if (rev.length) { const mm = rev.find((m) => m.key === 'CARGO_OPERATIONS|CMPL|ALGS'); ALERTS.push({ t: rev[0].sendAt, sev: 'info', title: `${CALL[rev[0].call].name}: estimates revised`, text: `${rev.length} services re-estimated${mm ? `, cargo ops now complete ${hhmm(mm.value)}` : ''}. Departure, pilot, tugs and linesmen re-planned.` }); }
+    const also = [...new Set(S.messages.filter((m) => m.revision === d.id && CALL[m.call].port !== d.port).map((m) => CALL[m.call].port))];
+    ALERTS.push({ t: d.start, end: d.end, port: d.port, also, sev: d.kind === 'wind' ? 'crit' : 'warn', title: d.title, text: d.detail });
+    for (const c of CALLS) {
+      const rev = S.messages.filter((m) => m.revision === d.id && m.cls === 'EST' && m.call === c.id);
+      if (!rev.length) continue;
+      if (c.prevCall) {
+        const o = S.outcomes[c.id]; const ba = rev.find((m) => m.key === 'BERTH|ARRI|INBD'); const missed = o.tide && o.tidePlan && o.tide.hw !== o.tidePlan.hw;
+        ALERTS.push({ t: rev[0].sendAt, port: c.port, sev: 'warn', title: `${c.name}: ${PORTS[c.port].name} call re-planned`, text: `${rev.length} services re-estimated after the ${hrs(o.prevDelay)} h delay in ${PORTS[CALL[c.prevCall].port].name}.${missed ? ` The ship now misses the tidal window at Vlissingen and waits for the next one: berth arrival moves from ${dayTime(c.pta)} to ${ba ? dayTime(ba.value) : 'later'}.` : ''}` });
+      } else {
+        const mm = rev.find((m) => m.key === 'CARGO_OPERATIONS|CMPL|ALGS');
+        ALERTS.push({ t: rev[0].sendAt, port: c.port, sev: 'info', title: `${c.name}: estimates revised`, text: `${rev.length} services re-estimated${mm ? `, cargo ops now complete ${hhmm(mm.value)}` : ''}. Departure, pilot, tugs and linesmen re-planned.` });
+      }
+    }
   }
-  ALERTS.push({ t: T.BW['ANCHORAGE|ARRI|'], end: T.BW['ANCHORAGE|DEPA|'], sev: 'warn', title: 'Baltic Wren anchored', text: 'First estimate came 5 h before arrival. The feeder berth was already planned, so the terminal requested 16:00.' });
-  ALERTS.push({ t: T.IR['BERTH|ARRI|INBD'], sev: 'good', title: `${CALL.IR.name} alongside on plan`, text: `ATA ${hhmm(T.IR['BERTH|ARRI|INBD'])} against PTA ${hhmm(CALL.IR.pta)}. Slowing down replaced about ${hrs(S.outcomes.IR.anchorAvoided)} h at anchor.` });
-  ALERTS.push({ t: T.GU['BUNKERING|STRT|ALGS'], end: T.GU['BUNKERING|CMPL|ALGS'], sev: 'info', title: `Bunkering alongside ${CALL.GU.name}`, text: 'Bunker barge on the water side, simultaneous with cargo operations on berth A.' });
-  ALERTS.push({ t: T.HG['SEA_PASSAGE|CMPL|INBD'], sev: 'info', title: 'Humber Gull inbound without pilot', text: 'Master holds a pilotage exemption certificate. No PBP or pilotage service in this call.' });
+  ALERTS.push({ t: T.BW['ANCHORAGE|ARRI|'], end: T.BW['ANCHORAGE|DEPA|'], port: 'RTM', sev: 'warn', title: 'Baltic Wren anchored', text: 'First estimate came 5 h before arrival. The feeder berth was already planned, so the terminal requested 16:00.' });
+  ALERTS.push({ t: T.IR['BERTH|ARRI|INBD'], port: 'RTM', sev: 'good', title: `${CALL.IR.name} alongside on plan`, text: `ATA ${hhmm(T.IR['BERTH|ARRI|INBD'])} against PTA ${hhmm(CALL.IR.pta)}. Slowing down replaced about ${hrs(S.outcomes.IR.anchorAvoided)} h at anchor.` });
+  ALERTS.push({ t: T.GU['BUNKERING|STRT|ALGS'], end: T.GU['BUNKERING|CMPL|ALGS'], port: 'RTM', sev: 'info', title: `Bunkering alongside ${CALL.GU.name}`, text: 'Bunker barge on the water side, simultaneous with cargo operations on berth A.' });
+  ALERTS.push({ t: T.HG['SEA_PASSAGE|CMPL|INBD'], port: 'RTM', sev: 'info', title: 'Humber Gull inbound without pilot', text: 'Master holds a pilotage exemption certificate. No PBP or pilotage service in this call.' });
+  if (NEXT) {
+    const A = T[NEXT.id], o = S.outcomes[NEXT.id], tw = o.tide;
+    ALERTS.push({ t: T[PREV.id]['BERTH|DEPA|OUTB'], port: PREV.port, also: [NEXT.port], sev: 'info', title: `${PREV.name} sails for ${PORTS[NEXT.port].name}`, text: `Departs ${PORT_UI[PREV.port].short} ${hrs(o.prevDelay)} h later than first planned. Next port: ${PORT_UI[NEXT.port].short}, ${PORTS[NEXT.port].name}.` });
+    ALERTS.push({ t: A['SEA_PASSAGE|CMPL|INBD'], port: NEXT.port, sev: 'info', title: `${NEXT.name} at the Wandelaar`, text: `Sea pilot boards from the pilot boat. Up the Westerschelde to Vlissingen${tw ? `, inside the tidal window ${hhmm(tw.start)}–${hhmm(tw.end)}` : ''}, where the river pilot takes over.` });
+    ALERTS.push({ t: A['BERTH|ARRI|INBD'], port: NEXT.port, sev: o.ripple > 60 ? 'warn' : 'good', title: `${NEXT.name} alongside ${PORT_UI[NEXT.port].short}`, text: `ATA ${dayTime(A['BERTH|ARRI|INBD'])} against the first plan of ${dayTime(NEXT.pta)}: ${hrs(o.ripple)} h later, from a ${hrs(o.prevDelay)} h delay in ${PORTS[PREV.port].name}.` });
+  }
   ALERTS.sort((a, b) => b.t - a.t);
 
+  const DIS = Object.fromEntries(DISRUPTIONS.map((d) => [d.id, d]));
+  const firstRev = NEXT ? S.messages.find((m) => m.call === NEXT.id && m.revision) : null;
   const MOMENTS = [
     { t: 60, label: 'Bunkering', sel: 'GU', view: 'quay' },
+    { t: DIS.Q03.start - 10, label: 'Q03 fault', sel: { kind: 'crane', id: 'Q03' }, view: 'quay' },
+    ...(NEXT ? [
+      ...(firstRev ? [{ t: firstRev.sendAt - 12, label: 'Antwerp re-plans', sel: NEXT.id, view: 'approach', port: NEXT.port }] : []),
+      { t: T[NEXT.id]['SEA_PASSAGE|CMPL|INBD'] - 16, label: 'Pilot at the Wandelaar', sel: NEXT.id, view: 'follow', port: NEXT.port, far: 1.6 },
+      { t: S.pilotChange[NEXT.id] - 12, label: 'Pilot change at Vlissingen', sel: NEXT.id, view: 'follow', port: NEXT.port, far: 2.4 },
+      { t: T[NEXT.id]['TOWAGE|STRT|INBD'] + 5, label: 'Swing at the Deurganckdok', sel: NEXT.id, view: 'terminal', port: NEXT.port },
+    ] : []),
     { t: T.NT['BERTH|DEPA|OUTB'] - 15, label: 'Nordic Tern sails', sel: 'NT', view: 'terminal' },
     { t: T.BW['ANCHORAGE|ARRI|'] - 25, label: 'Baltic Wren anchors', sel: 'BW', view: 'approach' },
     { t: T.HG['BERTH|ARRI|INBD'] - 30, label: 'Feeder without pilot', sel: 'HG', view: 'quay' },
@@ -132,8 +177,8 @@
     { t: T.IR['SEA_PASSAGE|CMPL|INBD'] - 30, label: 'Pilot by helicopter', sel: 'IR', view: 'follow' },
     { t: T.IR['BERTH|ARRI|INBD'] - 40, label: `${CALL.IR.name} berths on PTA`, sel: 'IR', view: 'quay' },
     { t: T.BW['ANCHORAGE|DEPA|'] - 10, label: 'Baltic Wren leaves anchor', sel: 'BW', view: 'approach' },
-    { t: DISRUPTIONS[0].start - 10, label: 'Wind stop', sel: 'IR', view: 'terminal' },
-    { t: DISRUPTIONS[1].start - 10, label: 'Q09 fault', sel: { kind: 'crane', id: 'Q09' }, view: 'quay' },
+    { t: DIS.WIND.start - 10, label: 'Wind stop', sel: 'IR', view: 'terminal' },
+    { t: DIS.Q09.start - 10, label: 'Q09 fault', sel: { kind: 'crane', id: 'Q09' }, view: 'quay' },
     { t: T.IR['BERTH|DEPA|OUTB'] - 25, label: `${CALL.IR.name} sails`, sel: 'IR', view: 'terminal' },
   ].sort((a, b) => a.t - b.t);
 
@@ -146,7 +191,7 @@
   const camera = new THREE.PerspectiveCamera(36, 1, 2, 260000);
   const controls = new THREE.MapControls(camera, renderer.domElement);
   controls.enableDamping = true; controls.dampingFactor = 0.12; controls.screenSpacePanning = false;
-  controls.maxPolarAngle = 1.32; controls.minDistance = 40; controls.maxDistance = 90000; controls.zoomSpeed = 1.2;
+  controls.maxPolarAngle = 1.32; controls.minDistance = 40; controls.maxDistance = 160000; controls.zoomSpeed = 1.2;
 
   const css = () => getComputedStyle(document.documentElement);
   const tok = (n) => css().getPropertyValue(n).trim() || '#888';
@@ -186,7 +231,7 @@
   // the sea plane and the harbour basins never write depth; land does, so hulls below the waterline stay hidden
   MAT.sea.depthWrite = false; MAT.seaDeep.depthWrite = false;
   MAT.basin.depthWrite = false; MAT.basin.depthTest = false;
-  rect(-200000, -200000, 200000, 200000, MAT.sea, 0).renderOrder = -10;
+  rect(-200000, -200000, 650000, 200000, MAT.sea, 0).renderOrder = -10; // one sea for both ports
   const strip = (a, b, w, mat, y) => { const len = Math.hypot(b[0] - a[0], b[1] - a[1]); const m = new THREE.Mesh(new THREE.PlaneGeometry(len, w), mat); m.rotation.set(-Math.PI / 2, Math.atan2(-(b[1] - a[1]), b[0] - a[0]), 0, 'YXZ'); m.position.set((a[0] + b[0]) / 2, y, (a[1] + b[1]) / 2); scene.add(m); return m; };
   const bar = (a, b, w, h, y, mat) => { const len = Math.hypot(b[0] - a[0], b[1] - a[1]); const m = box(len, h, w, mat); m.position.set((a[0] + b[0]) / 2, y, (a[1] + b[1]) / 2); m.rotation.y = Math.atan2(-(b[1] - a[1]), b[0] - a[0]); scene.add(m); return m; };
   strip(GEO.ENTRANCE, [GEO.ENTRANCE[0] + GEO.SEA_DIR[0] * 60000, GEO.ENTRANCE[1] + GEO.SEA_DIR[1] * 60000], 600, MAT.seaDeep, 0.2).renderOrder = -9;
@@ -220,8 +265,9 @@
     const col = new THREE.Color(); const NB = ['#8E9898', '#A3A9A6', '#7E8A8E', '#9C8A78', '#8A9A8C', '#B5B8B2'];
     list.forEach(([x, z, sx, sz, rot, h], i) => { DUMMY.position.set(x, 1.4 + h / 2, z); DUMMY.rotation.set(0, rot, 0); DUMMY.scale.set(sx, h, sz); DUMMY.updateMatrix(); inst.setMatrixAt(i, DUMMY.matrix); col.set(NB[Math.floor(SIM.rnd('nc' + i) * NB.length)]); inst.setColorAt(i, col); });
     scene.add(inst);
-    const tk = new THREE.InstancedMesh(new THREE.CylinderGeometry(1, 1, 1, 18), new THREE.MeshLambertMaterial({ color: '#E3E6E4' }), GEODATA.tanks.length);
-    GEODATA.tanks.forEach(([x, z, r], i) => { const h = 16 + SIM.rnd('th' + i) * 8; DUMMY.position.set(x, 1 + h / 2, z); DUMMY.rotation.set(0, 0, 0); DUMMY.scale.set(r, h, r); DUMMY.updateMatrix(); tk.setMatrixAt(i, DUMMY.matrix); });
+    const allTanks = [...GEODATA.tanks, ...GEODATA_ANR.tanks];
+    const tk = new THREE.InstancedMesh(new THREE.CylinderGeometry(1, 1, 1, 18), new THREE.MeshLambertMaterial({ color: '#E3E6E4' }), allTanks.length);
+    allTanks.forEach(([x, z, r], i) => { const h = 16 + SIM.rnd('th' + i) * 8; DUMMY.position.set(x, 1 + h / 2, z); DUMMY.rotation.set(0, 0, 0); DUMMY.scale.set(r, h, r); DUMMY.updateMatrix(); tk.setMatrixAt(i, DUMMY.matrix); });
     scene.add(tk);
   }
   // channel buoys along the Maasgeul (IALA A: red to port, green to starboard when entering)
@@ -240,12 +286,50 @@
   ring(GEO.MAASCENTER_PBP[0], GEO.MAASCENTER_PBP[1], 450, 30, markMat);
   ring(GEO.ANCHORAGE[0], GEO.ANCHORAGE[1], 3000, 45, markMat);
   ring(GEO.TURN[0], GEO.TURN[1], 300, 10, markMat).position.y = 1.6;
+  ring(GEO_ANR.PBP.WANDELAAR[0], GEO_ANR.PBP.WANDELAAR[1], 700, 40, markMat);
+  ring(GEO_ANR.VLISSINGEN[0], GEO_ANR.VLISSINGEN[1], 450, 30, markMat);
+  ring(GEO_ANR.TURN[0], GEO_ANR.TURN[1], 300, 10, markMat).position.y = 1.6;
   { const pad = new THREE.Mesh(new THREE.CircleGeometry(40, 32), MAT.dark); pad.rotation.x = -Math.PI / 2; pad.position.set(GEO.HELI_BASE[0], 1.8, GEO.HELI_BASE[1]); scene.add(pad); ring(GEO.HELI_BASE[0], GEO.HELI_BASE[1], 36, 4, markMat).position.y = 2; }
-  const TUG_ROW = GEO.vecLocal([0, -1]); // tugs lie in a row along the quay
-  bar([GEO.TUG_BASE[0] - TUG_ROW[0] * 20, GEO.TUG_BASE[1] - TUG_ROW[1] * 20], [GEO.TUG_BASE[0] + TUG_ROW[0] * 360, GEO.TUG_BASE[1] + TUG_ROW[1] * 360], 22, 4, 2, MAT.quay);
-  { const kb = box(200, 4, 20, MAT.quay); kb.position.set(GEO.KRVE_BASE[0], 2, GEO.KRVE_BASE[1]); scene.add(kb); }
+  // tugs lie in a row along a pontoon; boatmen have their own pontoon (Antwerp: schematic, at the inner end of the dock)
+  const TUG_IDS = { RTM: ['T1', 'T2', 'T3', 'T4', 'T5', 'T6', 'T7', 'T8'], ANR: ['A1', 'A2', 'A3', 'A4', 'A5', 'A6'] };
+  const MOOR_IDS = { RTM: ['M1', 'M2', 'M3'], ANR: ['B1', 'B2'] };
+  const TUG_ROW = { RTM: GEO.vecLocal([0, -1]), ANR: [1, 0] };
+  for (const port of ['RTM', 'ANR']) {
+    const G = GP[port], R = TUG_ROW[port], L = TUG_IDS[port].length * 46 - 8;
+    bar([G.TUG_BASE[0] - R[0] * 20, G.TUG_BASE[1] - R[1] * 20], [G.TUG_BASE[0] + R[0] * L, G.TUG_BASE[1] + R[1] * L], 22, 4, 2, MAT.quay);
+    const kb = box(200, 4, 20, MAT.quay); kb.position.set(G.KRVE_BASE[0], 2, G.KRVE_BASE[1]); scene.add(kb);
+  }
   // terminal buildings
   { const ops = box(70, 18, 40, MAT.white); ops.position.set(520, 10, 2440); scene.add(ops); const gate = box(30, 8, 200, MAT.quay); gate.position.set(520, 5, 1500); scene.add(gate); }
+
+  // ---- Antwerp: the Scheldt, the Deurganckdok and its terminals from OpenStreetMap (src/geo-anr-data.js);
+  // the Westerschelde and the North Sea coast are schematic. MPET quay along +z at x = 400000.
+  const GDA = GEODATA_ANR;
+  flat(GDA.land, MAT.land, 1).renderOrder = -8;
+  for (const w of GDA.water) flat(w, MAT.basin, 1.2).renderOrder = -7;
+  for (const p of GDA.pave) flat(p, MAT.pave, 1.4);
+  for (const q of ['M', 'G']) {
+    const L = QUAYS[q].len;
+    strip(qp(q, 0, 30), qp(q, L, 30), 64, MAT.quay, 1.6);
+    for (const d of [12, 42]) bar(qp(q, 0, d), qp(q, L, d), 1.2, 0.6, 1.9, MAT.rail);
+  }
+  {
+    // MPET yard: single-width container rows, straddle carrier style; Antwerp Gateway as stack blocks
+    const rows = GDA.rows;
+    const inst = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshLambertMaterial({ color: '#ffffff' }), rows.length + GDA.fill.length);
+    const col = new THREE.Color();
+    rows.forEach(([x, z, len, tiers], i) => { const h = tiers * 2.6; DUMMY.position.set(x, 1.5 + h / 2, z); DUMMY.rotation.set(0, 0, 0); DUMMY.scale.set(len, h, 2.5); DUMMY.updateMatrix(); inst.setMatrixAt(i, DUMMY.matrix); col.set(BOX_COLORS[Math.floor(SIM.rnd('mr' + i) * BOX_COLORS.length)]); inst.setColorAt(i, col); });
+    const NB = ['#8E9898', '#A3A9A6', '#7E8A8E', '#9C8A78', '#8A9A8C', '#B5B8B2'];
+    GDA.fill.forEach(([x, z, h], k) => { const i = rows.length + k; DUMMY.position.set(x, 1.4 + h / 2, z); DUMMY.rotation.set(0, 0, 0); DUMMY.scale.set(26, h, 116); DUMMY.updateMatrix(); inst.setMatrixAt(i, DUMMY.matrix); col.set(NB[Math.floor(SIM.rnd('gf' + k) * NB.length)]); inst.setColorAt(i, col); });
+    scene.add(inst);
+    // fairway buoys up the Westerschelde and the Scheldt (IALA A: red to port, green to starboard when inbound)
+    const g = new THREE.CylinderGeometry(9, 12, 22, 8);
+    const red = new THREE.InstancedMesh(g, MAT.red, GDA.buoys.length), green = new THREE.InstancedMesh(g, MAT.green, GDA.buoys.length);
+    GDA.buoys.forEach(([x, z, dx, dz], i) => { const sx = -dz, sz = dx; DUMMY.rotation.set(0, 0, 0); DUMMY.scale.set(1, 1, 1); DUMMY.position.set(x - sx * 320, 8, z - sz * 320); DUMMY.updateMatrix(); red.setMatrixAt(i, DUMMY.matrix); DUMMY.position.set(x + sx * 320, 8, z + sz * 320); DUMMY.updateMatrix(); green.setMatrixAt(i, DUMMY.matrix); });
+    scene.add(red, green);
+    // MPET buildings near the quay
+    const ops = box(60, 16, 36, MAT.white); ops.position.set(400560, 9, 1120); scene.add(ops);
+  }
 
   // ---- ECT Delta yard: automated stacking crane (ASC) blocks behind the quay, as mapped in OpenStreetMap
   const YARD = GEODATA.yard;                  // { x0, x1, z, w }: perpendicular to the quay, waterside end at x0
@@ -382,15 +466,25 @@
 
   // ---- small craft
   function craft(build, pick) { const g = new THREE.Group(); build(g); g.traverse((o) => { if (o.isMesh) o.userData.pick = pick; }); scene.add(g); return g; }
-  const tugs = {}; ['T1', 'T2', 'T3', 'T4', 'T5', 'T6', 'T7', 'T8'].forEach((id, i) => {
-    tugs[id] = { g: craft((g) => { const h = smallHull(30, 11, 3, MAT.tug); g.add(h); const w = box(8, 5, 8, MAT.white); w.position.set(4, 5.5, 0); g.add(w); }, { kind: 'tug', id }), home: [GEO.TUG_BASE[0] + TUG_ROW[0] * i * 46 - TUG_ROW[1] * 22, GEO.TUG_BASE[1] + TUG_ROW[1] * i * 46 + TUG_ROW[0] * 22], i };
-  });
+  const tugs = {};
+  for (const port of ['RTM', 'ANR']) {
+    const G = GP[port], R = TUG_ROW[port];
+    TUG_IDS[port].forEach((id, i) => {
+      tugs[id] = { g: craft((g) => { const h = smallHull(30, 11, 3, MAT.tug); g.add(h); const w = box(8, 5, 8, MAT.white); w.position.set(4, 5.5, 0); g.add(w); }, { kind: 'tug', id }), home: [G.TUG_BASE[0] + R[0] * i * 46 - R[1] * 22, G.TUG_BASE[1] + R[1] * i * 46 + R[0] * 22], i, port };
+    });
+  }
   const heli = { g: craft((g) => { const b = box(11, 3.6, 3.6, MAT.heli); g.add(b); const tail = box(9, 1.2, 1.2, MAT.heli); tail.position.set(-9, 0.8, 0); g.add(tail); const r = box(15, 0.25, 0.8, MAT.dark); r.position.y = 2.6; r.name = 'rotor'; g.add(r); const r2 = r.clone(); r2.rotation.y = Math.PI / 2; r2.name = 'rotor2'; g.add(r2); }, { kind: 'heli', id: 'H1' }) };
-  const tender = { g: craft((g) => { g.add(smallHull(20, 6, 3, MAT.tender)); const w = box(6, 3, 4, MAT.white); w.position.set(1, 4, 0); g.add(w); }, { kind: 'tender', id: 'PT1' }) };
-  const krve = {}; ['M1', 'M2', 'M3'].forEach((id, i) => { krve[id] = { g: craft((g) => { g.add(smallHull(14, 4.5, 2, MAT.krve)); const w = box(4, 2.2, 3, MAT.white); w.position.set(0, 3, 0); g.add(w); }, { kind: 'moor', id }), home: [GEO.KRVE_BASE[0] - 60 + i * 30, GEO.KRVE_BASE[1] - 22] }; });
+  const tenders = {
+    RTM: { g: craft((g) => { g.add(smallHull(20, 6, 3, MAT.tender)); const w = box(6, 3, 4, MAT.white); w.position.set(1, 4, 0); g.add(w); }, { kind: 'tender', id: 'RTM' }), port: 'RTM' },
+    ANR: { g: craft((g) => { for (const z of [-3.2, 3.2]) { const h = smallHull(24, 2.6, 3, MAT.tender); h.position.z = z; g.add(h); } const w = box(14, 4.5, 9, MAT.white); w.position.set(0, 6, 0); g.add(w); }, { kind: 'tender', id: 'ANR' }), port: 'ANR' }, // SWATH pilot boat
+  };
+  const tender = tenders.RTM;
+  const vliss = { g: craft((g) => { g.add(smallHull(20, 6, 3, MAT.tender)); const w = box(6, 3, 4, MAT.white); w.position.set(1, 4, 0); g.add(w); }, { kind: 'tender', id: 'VLI' }), port: 'ANR' };
+  const krve = {};
+  for (const port of ['RTM', 'ANR']) MOOR_IDS[port].forEach((id, i) => { krve[id] = { g: craft((g) => { g.add(smallHull(14, 4.5, 2, MAT.krve)); const w = box(4, 2.2, 3, MAT.white); w.position.set(0, 3, 0); g.add(w); }, { kind: 'moor', id }), home: [GP[port].KRVE_BASE[0] - 60 + i * 30, GP[port].KRVE_BASE[1] - 22], port }; });
   const bunkerV = { g: craft((g) => { g.add(smallHull(110, 15, 5, MAT.sludge)); const d = box(70, 1.2, 9, MAT.red); d.position.set(0, 6.4, 0); g.add(d); for (const x of [-20, 0, 20]) { const p = box(1.2, 3, 7, MAT.white); p.position.set(x, 8, 0); g.add(p); } const h = box(12, 9, 13, MAT.white); h.position.set(-46, 10, 0); g.add(h); }, { kind: 'bunker', id: 'BNK' }) };
   const sludgeV = { g: craft((g) => { g.add(smallHull(70, 11, 4, MAT.sludge)); const h = box(8, 6, 8, MAT.white); h.position.set(-28, 8, 0); g.add(h); }, { kind: 'sludge', id: 'SLDG' }) };
-  [...Object.values(tugs), heli, tender, ...Object.values(krve), bunkerV, sludgeV].forEach((o) => pickables.push(o.g));
+  [...Object.values(tugs), heli, ...Object.values(tenders), vliss, ...Object.values(krve), bunkerV, sludgeV].forEach((o) => pickables.push(o.g));
   Object.values(cranes).forEach((k) => pickables.push(k.g));
 
   // ---- AGVs for the quay cranes (6 per working crane), straddle carriers at the feeder terminal
@@ -401,8 +495,18 @@
   { const col = new THREE.Color(); for (let i = 0; i < NA; i++) { col.set(i >= N_AGV ? '#7C909A' : '#D3AC37'); agvBody.setColorAt(i, col); col.set(BOX_COLORS[i % BOX_COLORS.length]); agvBox.setColorAt(i, col); } }
   agvBody.userData.pick = { kind: 'agv' }; scene.add(agvBody, agvBox); pickables.push(agvBody);
   const agvState = new Array(NA).fill(null);
-  const STS_IDS = CRANES.filter((k) => k.type === 'STS' && !k.idle).map((k) => k.id);
-  const FEED_IDS = CRANES.filter((k) => k.type === 'FEEDER').map((k) => k.id);
+  const STS_IDS = CRANES.filter((k) => k.port === 'RTM' && k.type === 'STS' && !k.idle).map((k) => k.id);
+  const FEED_IDS = CRANES.filter((k) => k.port === 'RTM' && k.type === 'FEEDER').map((k) => k.id);
+  // ---- straddle carriers at MPET (4 per working crane), carrying one container between their legs
+  const MPET_IDS = CRANES.filter((k) => k.port === 'ANR' && k.q === 'M' && !k.idle).map((k) => k.id);
+  const N_SC = MPET_IDS.length * 4;
+  const scLegs = new THREE.InstancedMesh(new THREE.BoxGeometry(0.9, 12, 8.5), MAT.armg, N_SC * 2);
+  const scTop = new THREE.InstancedMesh(new THREE.BoxGeometry(5.6, 1.8, 8.5), new THREE.MeshLambertMaterial({ color: '#D3AC37' }), N_SC); // own material: three r128 shares programs per material, and agvBody has instance colours
+  const scBox = new THREE.InstancedMesh(new THREE.BoxGeometry(2.5, 2.6, 12.2), new THREE.MeshLambertMaterial({ color: '#ffffff' }), N_SC);
+  [scLegs, scTop, scBox].forEach((m) => { m.instanceMatrix.setUsage(THREE.DynamicDrawUsage); scene.add(m); });
+  { const col = new THREE.Color(); for (let i = 0; i < N_SC; i++) { col.set(BOX_COLORS[(i * 5) % BOX_COLORS.length]); scBox.setColorAt(i, col); } }
+  scTop.userData.pick = { kind: 'sc' }; scLegs.userData.pick = { kind: 'sc' }; pickables.push(scTop, scLegs);
+  const scState = new Array(N_SC).fill(null);
   const nearestBlock = (z, list) => { let b = 0, bd = 1e9; list.forEach((x, i) => { const d = Math.abs(x.z - z); if (d < bd) { bd = d; b = i; } }); return b; };
   // polyline pose with vessel-style heading (+x forward)
   function route(pts, u) { const p = along(pts, u); return { x: p.x, z: p.z, h: p.yaw - Math.PI / 2 }; }
@@ -447,6 +551,13 @@
     const off = c.size === 'ULCV' ? [[L / 2 + 45, 0], [-L / 2 - 45, 0], [L * 0.28, -(B / 2 + 16)], [-L * 0.28, -(B / 2 + 16)]][k] : [[-L / 2 - 36, 0]][k] || [0, -(B / 2 + 14)];
     const [x, z] = l2w(v, off[0], off[1]); return { x, z, h: v.h + (k === 1 ? 0 : 0) };
   }
+  // tug routes from the base to the meeting point: out to sea (inbound jobs) or into the basin (outbound jobs)
+  function tugVia(j) {
+    if (j.port === 'ANR') return { seaOut: [qp('M', 2350, -220), GEO_ANR.EXIT], basin: [] };
+    const H = GEO.HARBOUR; return { seaOut: [H[3], H[2], H[1], H[0], GEO.ENTRANCE], basin: S.info[j.call].q === 'Q' ? [H[4], GEO.MOUTH] : [H[4]] };
+  }
+  // the river pilot boards at Vlissingen while the sea pilot leaves (Antwerp): a pilot boat comes alongside
+  const pilotSwaps = Object.entries(S.pilotChange).map(([call, tc]) => ({ call, port: CALL[call].port, kind: 'swap', t0: tc - 20, t1: tc - 3, t2: tc + 5, t3: tc + 22 }));
   function updateScene(t, secs) {
     // vessels
     for (const c of CALLS) {
@@ -523,6 +634,34 @@
       setAgv(i, 64 + (pk % 8) * 6.2, 1160 + Math.floor(pk / 8) * 17, 0, false, { parked: true }); pk++;
     }
     agvBody.instanceMatrix.needsUpdate = true; agvBox.instanceMatrix.needsUpdate = true;
+    // straddle carriers: under the crane, back to a container row behind the berth, and back
+    const scUsed = new Array(N_SC).fill(false);
+    const setSc = (i, x, z, yaw, carry, st) => {
+      const c = Math.cos(yaw), sn = Math.sin(yaw); DUMMY.rotation.set(0, yaw, 0); DUMMY.scale.set(1, 1, 1);
+      for (const k of [0, 1]) { const v = k ? 2.4 : -2.4; DUMMY.position.set(x + v * c, 7.5, z - v * sn); DUMMY.updateMatrix(); scLegs.setMatrixAt(i * 2 + k, DUMMY.matrix); }
+      DUMMY.position.set(x, 14.4, z); DUMMY.updateMatrix(); scTop.setMatrixAt(i, DUMMY.matrix);
+      if (carry) DUMMY.position.set(x, 5.2, z); else { DUMMY.position.set(x, -50, z); DUMMY.scale.set(0.001, 0.001, 0.001); }
+      DUMMY.updateMatrix(); scBox.setMatrixAt(i, DUMMY.matrix); scUsed[i] = true; scState[i] = st;
+    };
+    MPET_IDS.forEach((cid, ci) => {
+      const cs = craneAt(cid, t); if (!cs.a || cs.state === 'idle') return;
+      const sq = cs.z; const kindDis = cs.kind ? cs.kind !== 'LOAD' : true; const yawQ = 0;
+      for (let k = 0; k < 4; k++) {
+        const i = ci * 4 + k; const qq = cs.m / 4 + k / 4; const cyc = Math.floor(qq); const ph = qq - cyc; const r = SIM.rnd(cid + 'sc' + cyc + '-' + k);
+        const zRow = Math.round((sq + (r - 0.5) * 360 - 30) / 7) * 7 + 30; const dIn = 120 + SIM.rnd(cid + 'x' + cyc + '-' + k) * 360;
+        const P0 = qp('M', sq + (k - 1.5) * 3, 27), P1 = qp('M', sq + (k - 1.5) * 10, 62), P2 = qp('M', zRow, 84), P3 = qp('M', zRow, dIn), Pq = qp('M', sq - 16 + k * 9, 52);
+        const yaw3 = Math.atan2(P3[0] - P2[0], P3[1] - P2[1]);
+        let pose, carry;
+        if (ph < 0.12) { pose = { x: P0[0], z: P0[1], yaw: yawQ }; carry = kindDis ? ph > 0.06 : ph < 0.06; }
+        else if (ph < 0.42) { pose = along([P0, P1, P2, P3], (ph - 0.12) / 0.3); carry = kindDis; }
+        else if (ph < 0.58) { pose = { x: P3[0], z: P3[1], yaw: yaw3 }; carry = kindDis ? ph < 0.5 : ph > 0.5; }
+        else if (ph < 0.88) { pose = along([P3, P2, P1, Pq], (ph - 0.58) / 0.3); carry = !kindDis; }
+        else { pose = along([Pq, P0], (ph - 0.88) / 0.12); carry = !kindDis; }
+        setSc(i, pose.x, pose.z, pose.yaw, carry, { crane: cid, carry, call: cs.a.call, stopped: cs.state === 'stop', moving: !(ph < 0.12 || (ph >= 0.42 && ph < 0.58)) && cs.state === 'work' });
+      }
+    });
+    for (let i = 0; i < N_SC; i++) if (!scUsed[i]) { const pp = qp('M', 70 + (i % 16) * 8, 62 + Math.floor(i / 16) * 14); setSc(i, pp[0], pp[1], Math.PI / 2, false, { parked: true }); }
+    scLegs.instanceMatrix.needsUpdate = true; scTop.instanceMatrix.needsUpdate = true; scBox.instanceMatrix.needsUpdate = true;
     // trucks: loop on the landside road
     {
       const xa = 458, xb = 482, z0 = 150, z1 = 2460, Lp = 2 * (z1 - z0) + 2 * (xb - xa);
@@ -555,7 +694,7 @@
         if (!j.tugs.includes(id) || t < j.t0 || t > (j.tBack ?? j.t0)) continue;
         const arrive = j.t0 + 25;
         const meet = tugTarget(j, id, j.tMeet);
-        const H = GEO.HARBOUR; const seaOut = [H[3], H[2], H[1], H[0], GEO.ENTRANCE]; const basin = S.info[j.call].q === 'Q' ? [H[4], GEO.MOUTH] : [H[4]];
+        const { seaOut, basin } = tugVia(j);
         if (t < arrive && meet) { const via = j.phase === 'INBD' ? seaOut : basin; pose = { ...route([tg.home, ...via, [meet.x, meet.z]], smooth((t - j.t0) / 25)), st: `Heading to ${CALL[j.call].name}` }; }
         else if (t < j.tMeet && meet) pose = { ...meet, st: `Standing by for ${CALL[j.call].name}` };
         else if (t <= j.tRelease) { const p = tugTarget(j, id, t); if (p) pose = { ...p, st: `Towing ${CALL[j.call].name} (${j.phase === 'INBD' ? 'inbound' : 'outbound'})` }; }
@@ -581,11 +720,11 @@
       placeCraft(heli.g, pose.x, pose.z, pose.h, pose.y, 1300); heli.pose = pose;
       const rot = pose.fly && !reduceMotion ? secs * 30 : 0.3; heli.g.getObjectByName('rotor').rotation.y = rot; heli.g.getObjectByName('rotor2').rotation.y = rot + Math.PI / 2;
     }
-    // pilot tender
-    {
-      const home = GEO.TENDER_STATION; let pose = { x: home[0], z: home[1], h: 0.4, st: 'On station off Maascenter' };
+    // pilot tenders: Maascenter (Rotterdam), the Wandelaar (Antwerp, SWATH), and the pilot change off Vlissingen
+    for (const port in tenders) {
+      const td = tenders[port]; const home = GP[port].TENDER_STATION; let pose = { x: home[0], z: home[1], h: 0.4, st: port === 'ANR' ? 'On station at the Wandelaar' : 'On station off Maascenter' };
       for (const f of S.tender) {
-        if (t < f.t0 || t > f.t3) continue;
+        if (f.port !== port || t < f.t0 || t > f.t3) continue;
         const c = CALL[f.call]; const at = (tt) => { const v = vesselAt(c.id, tt); if (!v) return null; const [x, z] = l2w(v, 0, -(c.beam / 2 + 9)); return { x, z, h: v.h }; };
         const tgt = at(clamp(t, f.t1, f.t2)) || at(f.t1); if (!tgt) break;
         if (t < f.t1) { const u = smooth((t - f.t0) / (f.t1 - f.t0)); pose = { x: lerp(home[0], tgt.x, u), z: lerp(home[1], tgt.z, u), h: Math.atan2(-(tgt.z - home[1]), tgt.x - home[0]), st: `Bringing a pilot to ${c.name}` }; }
@@ -593,7 +732,20 @@
         else { const u = smooth((t - f.t2) / (f.t3 - f.t2)); pose = { x: lerp(tgt.x, home[0], u), z: lerp(tgt.z, home[1], u), h: Math.atan2(-(home[1] - tgt.z), home[0] - tgt.x), st: 'Returning to station' }; }
         break;
       }
-      placeCraft(tender.g, pose.x, pose.z, pose.h, 0, 1400); tender.pose = pose;
+      placeCraft(td.g, pose.x, pose.z, pose.h, 0, 1400); td.pose = pose;
+    }
+    {
+      const home = GDA.places.Vlissingen; let pose = { x: home[0], z: home[1], h: 0, st: 'In Vlissingen' };
+      for (const f of pilotSwaps) {
+        if (t < f.t0 || t > f.t3) continue;
+        const c = CALL[f.call]; const at = (tt) => { const v = vesselAt(c.id, tt); if (!v) return null; const [x, z] = l2w(v, 0, -(c.beam / 2 + 9)); return { x, z, h: v.h }; };
+        const tgt = at(clamp(t, f.t1, f.t2)) || at(f.t1); if (!tgt) break;
+        if (t < f.t1) { const u = smooth((t - f.t0) / (f.t1 - f.t0)); pose = { x: lerp(home[0], tgt.x, u), z: lerp(home[1], tgt.z, u), h: Math.atan2(-(tgt.z - home[1]), tgt.x - home[0]), st: `Bringing the river pilot to ${c.name}` }; }
+        else if (t <= f.t2) pose = { ...tgt, st: `Alongside ${c.name}: river pilot on, sea pilot off` };
+        else { const u = smooth((t - f.t2) / (f.t3 - f.t2)); pose = { x: lerp(tgt.x, home[0], u), z: lerp(tgt.z, home[1], u), h: Math.atan2(-(home[1] - tgt.z), home[0] - tgt.x), st: 'Returning to Vlissingen with the sea pilot' }; }
+        break;
+      }
+      placeCraft(vliss.g, pose.x, pose.z, pose.h, 0, 1400); vliss.pose = pose;
     }
     // mooring boats + linesmen
     let pi = 0; const putPerson = (x, y, z) => { if (pi >= N_PEOPLE) return; DUMMY.position.set(x, y + 0.95, z); DUMMY.rotation.set(0, 0, 0); DUMMY.scale.set(1, 1, 1); DUMMY.updateMatrix(); people.setMatrixAt(pi++, DUMMY.matrix); };
@@ -608,7 +760,7 @@
         if (t >= j.t0 && t <= j.t1) { const bi = S.info[c.id]; for (const dz of [-c.loa * 0.43, -c.loa * 0.43 + 5, c.loa * 0.43, c.loa * 0.43 - 5]) { const pp = qp(bi.q, bi.sc + dz, 6); putPerson(pp[0], 1.6, pp[1]); } }
         pose.job = j; break;
       }
-      if (!pose) pose = { x: b.home[0], z: b.home[1], h: 0, st: 'At KRVE base' };
+      if (!pose) pose = { x: b.home[0], z: b.home[1], h: 0, st: b.port === 'ANR' ? 'At the boatmen pontoon' : 'At KRVE base' };
       placeCraft(b.g, pose.x, pose.z, pose.h, 0, 1200); b.pose = pose;
     }
     // lashers on deck at start and end of cargo operations
@@ -646,10 +798,10 @@
   // ======================================================================= labels
   const labelsEl = $('labels');
   const LABELS = [];
-  function addLabel(cls, html, pos, min, max, onClick) {
+  function addLabel(cls, html, pos, min, max, onClick, port = 'RTM') {
     const e = document.createElement('div'); e.className = 'lbl ' + cls; e.innerHTML = html; labelsEl.appendChild(e);
     if (onClick) e.addEventListener('click', (ev) => { ev.stopPropagation(); onClick(); });
-    const L = { e, pos, min, max, shown: true }; LABELS.push(L); return L;
+    const L = { e, pos, min, max, shown: true, port }; LABELS.push(L); return L;
   }
   const P3 = (x, y, z) => () => [x, y, z];
   const G = (x, z) => GEO.g(x, z);
@@ -671,38 +823,63 @@
     ['Other Delta berths · not modelled', GEO.qp('Q', 620, -10), 300, 9000], ['Yard · ASC blocks', [280, 2380], 300, 6000], ['Rail', [600, 500], 300, 4000],
   ];
   for (const [n, p, mn, mx] of PLACES) addLabel('place', esc(n), P3(p[0], 0, p[1]), mn, mx);
+  {
+    const PL = GDA.places, G = GEO_ANR;
+    const ANR_PLACES = [
+      ['North Sea', PL['North Sea'], 20000, 1e9], ['Westerschelde', PL.Westerschelde, 15000, 1e9], ['Zeebrugge', PL.Zeebrugge, 20000, 1e9],
+      ['Terneuzen', PL.Terneuzen, 15000, 1e9], ['Hansweert', PL.Hansweert, 15000, 1e9], ['Bath', PL.Bath, 7000, 1e9],
+      ['Scheldt', PL.Scheldt, 2500, 60000], ['Doel', PL.Doel, 2500, 40000], ['Deurganckdok', PL.Deurganckdok, 1200, 30000],
+      ['MSC PSA European Terminal', PL.MPET, 4000, 30000], ['Antwerp Gateway · not modelled', PL['Antwerp Gateway'], 3000, 20000],
+      ['Kieldrecht lock', PL['Kieldrecht lock'], 1200, 4000], ['Waaslandhaven', PL.Waaslandhaven, 4500, 40000], ['Antwerp', PL.Antwerp, 8000, 1e9],
+      ['Wandelaar pilot station', G.PBP.WANDELAAR, 6000, 1e9], ['Vlissingen · pilot change', G.VLISSINGEN, 4000, 1e9],
+      ['Turning area', G.TURN, 700, 9000], ['Tug standby', G.TUG_BASE, 600, 3000], ['Boatmen', G.KRVE_BASE, 600, 3000],
+      ['Berth M', qp('M', 1920, -10), 300, 7000], ['Other MPET berths · not modelled', qp('M', 900, -10), 300, 2500], ['Yard · straddle carriers', qp('M', 1500, 330), 300, 2500],
+    ];
+    for (const [n, p, mn, mx] of ANR_PLACES) addLabel('place', esc(n), P3(p[0], 0, p[1]), mn, mx, null, 'ANR');
+  }
   const vLabels = {};
   for (const c of CALLS) {
-    vLabels[c.id] = addLabel('vessel', `${esc(c.name)}<small></small>`, () => { const p = vesselPos[c.id]; if (!p) return null; const sc = vessels[c.id].g.scale.x; return [p.x, (c.size === 'ULCV' ? 62 : 30) * sc, p.z]; }, 0, 1e9, () => select({ kind: 'vessel', id: c.id }));
+    vLabels[c.id] = addLabel('vessel', `${esc(c.name)}<small></small>`, () => { const p = vesselPos[c.id]; if (!p) return null; const sc = vessels[c.id].g.scale.x; return [p.x, (c.size === 'ULCV' ? 62 : 30) * sc, p.z]; }, 0, 1e9, () => select({ kind: 'vessel', id: c.id }), c.port);
   }
+  // the next-port call before it reaches the map: a marker offshore, where it will come from
+  const GHOST = NEXT ? (() => { const a = GEO_ANR.PBP.WANDELAAR, b = GEO_ANR.FAR, k = 12000 / Math.hypot(b[0] - a[0], b[1] - a[1]); return [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k]; })() : null;
+  const ghost = NEXT ? addLabel('vessel ghost', `${esc(NEXT.name)}<small></small>`, () => (vesselPos[NEXT.id] ? null : [GHOST[0], 0, GHOST[1]]), 0, 1e9, () => select({ kind: 'vessel', id: NEXT.id }), NEXT.port) : null;
   const heliLabel = addLabel('craft', 'Pilot helicopter', () => (heli.pose?.fly ? [heli.g.position.x, heli.g.position.y + 30 * heli.g.scale.x, heli.g.position.z] : null), 0, 1e9);
   const lngLabel = addLabel('craft', 'Bunker barge', () => (bunkerV.pose?.job ? [bunkerV.g.position.x, 30 * bunkerV.g.scale.x, bunkerV.g.position.z] : null), 0, 12000);
   const vtmp = new THREE.Vector3();
   function updateLabels() {
     const w = stage.clientWidth, h = stage.clientHeight; const camD = camera.position.distanceTo(controls.target);
     for (const L of LABELS) {
-      const p = L.pos(); let show = !!p && camD >= L.min && camD <= L.max;
+      const p = L.port === state.port ? L.pos() : null; let show = !!p && camD >= L.min && camD <= L.max;
       if (show) { vtmp.set(p[0], p[1], p[2]).project(camera); show = vtmp.z < 1 && vtmp.x > -1.2 && vtmp.x < 1.2 && vtmp.y > -1.2 && vtmp.y < 1.2; if (show) { const x = ((vtmp.x + 1) / 2) * w, y = ((1 - vtmp.y) / 2) * h; L.e.style.transform = `translate(${x.toFixed(1)}px, ${y.toFixed(1)}px) translate(-50%, -100%)`; } }
       if (show !== L.shown) { L.e.style.display = show ? '' : 'none'; L.shown = show; }
     }
   }
 
   // ======================================================================= camera views
+  const quayView = (port) => {
+    const s = state.sel; let q = port === 'ANR' ? 'M' : 'Q', sq = port === 'ANR' ? 1920 : 2005;
+    if (s?.kind === 'vessel' && S.info[s.id] && CALL[s.id].port === port) { q = S.info[s.id].q; sq = S.info[s.id].sc; }
+    if (s?.kind === 'crane' && craneById[s.id].port === port) { q = craneById[s.id].q; sq = craneAt(s.id, state.t).z; }
+    const Q = QUAYS[q]; const p = qp(q, sq, -40);
+    return { target: [p[0], 0, p[1]], off: [Q.w[0] * 560 + Q.a[0] * 470, 330, Q.w[1] * 560 + Q.a[1] * 470] };
+  };
   const VIEWS = {
-    approach: () => { const p = off(14200, 1800); return { target: [p[0], 0, p[1]], off: [-GEO.SEA_DIR[0] * 25000, 27500, -GEO.SEA_DIR[1] * 25000] }; },
-    terminal: () => ({ target: [60, 0, 2120], off: [-1550, 1650, 1950] }),
-    quay: () => {
-      const s = state.sel; let q = 'Q', sq = 2005;
-      if (s?.kind === 'vessel' && S.info[s.id]) { q = S.info[s.id].q; sq = S.info[s.id].sc; }
-      if (s?.kind === 'crane') { q = craneById[s.id].q; sq = craneAt(s.id, state.t).z; }
-      const Q = QUAYS[q]; const p = qp(q, sq, -40);
-      return { target: [p[0], 0, p[1]], off: [Q.w[0] * 560 + Q.a[0] * 470, 330, Q.w[1] * 560 + Q.a[1] * 470] };
+    RTM: {
+      approach: () => { const p = off(14200, 1800); return { target: [p[0], 0, p[1]], off: [-GEO.SEA_DIR[0] * 25000, 27500, -GEO.SEA_DIR[1] * 25000] }; },
+      terminal: () => ({ target: [60, 0, 2120], off: [-1550, 1650, 1950] }),
+      quay: () => quayView('RTM'),
+    },
+    ANR: { // the whole run from the Wandelaar up the Scheldt; the Deurganckdok; the MPET quay
+      approach: () => ({ target: [454700, 0, -22900], off: [-29500, 87400, -62900] }), // side on: the Wandelaar left, Antwerp right
+      terminal: () => ({ target: [399850, 0, 2050], off: [-1700, 1750, 2100] }),
+      quay: () => quayView('ANR'),
     },
   };
   let fly = null;
   function setView(name, instant) {
     state.view = name; document.querySelectorAll('#views button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.view === name)));
-    const v = VIEWS[name](); const asp = stage.clientWidth / Math.max(1, stage.clientHeight); const k = asp < 1 ? 1.55 : asp < 1.3 ? 1.2 : 1;
+    const v = VIEWS[state.port][name](); const asp = stage.clientWidth / Math.max(1, stage.clientHeight); const k = asp < 1 ? 1.55 : asp < 1.3 ? 1.2 : 1;
     const to = new THREE.Vector3(v.target[0], v.target[1], v.target[2]); const pos = new THREE.Vector3(v.target[0] + v.off[0] * k, v.off[1] * k, v.target[2] + v.off[2] * k);
     if (instant || reduceMotion) { controls.target.copy(to); camera.position.copy(pos); fly = null; }
     else fly = { t0: performance.now(), dur: 1100, fromT: controls.target.clone(), toT: to, fromP: camera.position.clone(), toP: pos };
@@ -726,12 +903,25 @@
       let o = h.object; while (o && !o.userData.pick) o = o.parent; if (!o || !o.visible) continue;
       const p = o.userData.pick;
       if (p.kind === 'agv') { if (h.instanceId === undefined || !agvState[h.instanceId] || agvState[h.instanceId].parked) continue; select({ kind: 'agv', id: h.instanceId }); return; }
+      if (p.kind === 'sc') { if (h.instanceId === undefined) continue; const i = h.object === scLegs ? Math.floor(h.instanceId / 2) : h.instanceId; if (!scState[i] || scState[i].parked) continue; select({ kind: 'sc', id: i }); return; }
       select({ kind: p.kind, id: p.id }); return;
     }
     select(null);
   });
+  const selPort = (sel) => (sel?.kind === 'vessel' ? CALL[sel.id].port : sel?.kind === 'crane' ? craneById[sel.id].port : sel?.kind === 'tug' ? tugs[sel.id].port : sel?.kind === 'moor' ? krve[sel.id].port : sel?.kind === 'tender' ? (sel.id === 'VLI' ? 'ANR' : sel.id) : sel?.kind === 'sc' ? 'ANR' : sel ? 'RTM' : null);
+  function setPort(port, instantView = true) {
+    if (port === state.port) return false;
+    state.port = port; state.follow = false; feedSig = ''; cardSig = ''; uiDirty = true;
+    document.querySelectorAll('#ports button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.port === port)));
+    $('brand-eyebrow').textContent = PORT_UI[port].eyebrow;
+    vlist.querySelectorAll('.vrow').forEach((r) => { r.hidden = CALL[r.dataset.call].port !== port; });
+    if (state.sel && selPort(state.sel) !== port) { state.sel = null; renderCard(true); }
+    setView(VIEWS[port][state.view] ? state.view : 'terminal', instantView);
+    return true;
+  }
   function select(sel) {
     if (sel && typeof sel === 'string') sel = { kind: 'vessel', id: sel };
+    if (sel) setPort(selPort(sel));
     state.sel = sel; state.openKey = null; if (!sel || sel.kind !== 'vessel') state.follow = false;
     cardSig = ''; renderCard(true); uiDirty = true;
     for (const id in vLabels) vLabels[id].e.classList.toggle('sel', sel?.kind === 'vessel' && sel.id === id);
@@ -748,6 +938,8 @@
   });
   function statusDetail(c, t, st) {
     const A = S.times[c.id];
+    if (st.code === 'prev') { const P = CALL[c.prevCall]; const m = latest(P.id, 'BERTH|DEPA|OUTB', null, t); return `${callStatus(P, t).label} at ${PORT_UI[P.port].short} · ETD ${m ? hhmm(m.value) : 'n/a'}`; }
+    if (c.prevCall && st.code === 'sea') { const tw = tideNow(c, t); const m = latest(c.id, 'BERTH|ARRI|INBD', null, t); return `${tw ? `Vlissingen window ${hhmm(tw.start)}–${hhmm(tw.end)} · ` : ''}ETA berth ${m ? cellTime(m.value, t) : 'n/a'}`; }
     if (st.code === 'exp' || st.code === 'sea') {
       const m = latest(c.id, 'BERTH|ARRI|INBD', 'PLN', t);
       if (c.jit && t >= c.jit.window - c.jit.etaUnconstrained - 4000) return `${c.jit.speedJit} kn instead of ${c.jit.speedFull} kn · PTA berth ${m ? hhmm(m.value) : 'n/a'}`;
@@ -760,6 +952,8 @@
     if (st.code === 'sail') return `ETD ${hhmm(latest(c.id, 'BERTH|DEPA|OUTB', 'PLN', t)?.value ?? A['BERTH|DEPA|OUTB'])}`;
     return `Sailed ${dayTime(A['BERTH|DEPA|OUTB'])}`;
   }
+  // the tidal window in force for a next-port call, as far as the messages sent by t tell
+  const tideNow = (c, t) => { const o = S.outcomes[c.id]; if (!o?.tide) return null; const rev = S.messages.find((m) => m.call === c.id && m.revision); return rev && t >= rev.sendAt ? o.tide : o.tidePlan; };
   function renderCard(force) {
     const s = state.sel; const t = state.t;
     if (!s) { card.hidden = true; return; }
@@ -790,7 +984,7 @@
         }
       }
       const pob = S.pilotOnBoard.find((p) => p.call === c.id && t >= p.from && t <= p.to);
-      html = `<div class="card-head"><div><div class="eyebrow">${esc(PARTIES[c.carrier].name)} · ${esc(c.serviceName)} · ${c.voyIn}${c.voyOut !== c.voyIn ? ' / ' + c.voyOut : ''}</div><h2>${esc(c.name)}</h2></div>
+      html = `<div class="card-head"><div><div class="eyebrow">${esc(PORTS[c.port].name)} · ${esc(PARTIES[c.carrier].name)} · ${esc(c.serviceName)} · ${c.voyIn}${c.voyOut !== c.voyIn ? ' / ' + c.voyOut : ''}</div><h2>${esc(c.name)}</h2></div>
         <div class="acts"><button class="btn" type="button" data-act="follow" aria-pressed="${state.follow}">Follow</button><button class="btn icon" type="button" data-act="close" aria-label="Close">×</button></div>
         <div class="sub">${c.loa} m · ${c.beam} m beam · ${fmtN(c.teu)} TEU${c.fictional ? ' · fictional vessel' : ''}</div></div>
         <div class="card-body">
@@ -805,25 +999,37 @@
     let title = '', eyebrow = '', kv = [], story = '';
     if (s.kind === 'crane') {
       const k = craneById[s.id]; const cs = craneAt(s.id, t);
-      eyebrow = k.idle ? 'Ship-to-shore crane · other Delta berth' : k.type === 'STS' ? 'Ship-to-shore crane · remote operated' : 'Feeder and barge crane'; title = s.id;
+      eyebrow = k.other ? 'Ship-to-shore crane · Antwerp Gateway' : k.idle ? `Ship-to-shore crane · other ${k.port === 'ANR' ? 'MPET' : 'Delta'} berth` : k.type === 'STS' ? (k.port === 'ANR' ? 'Ship-to-shore crane · MPET' : 'Ship-to-shore crane · remote operated') : 'Feeder and barge crane'; title = s.id;
       const stl = { work: 'Working', stop: 'Stopped', ready: 'Positioned, waiting for cargo ops', done: 'Finished', idle: 'Idle, boom up' }[cs.state];
       kv.push(['Status', stl], ['Outreach', `${k.outreach} m`]); if (k.year) kv.push(['Delivered', String(k.year)]);
       if (cs.a) { const c = CALL[cs.a.call]; kv.push(['Vessel', c.name], ['Moves', `${fmtN(cs.m)} of ${fmtN(cs.a.total)}`], ['Gross rate', `${cs.a.rate.toFixed(1)} moves/h`], ['Started', dayTime(cs.a.tStart)], ['Expected finish', dayTime(cs.a.tEnd)]); if (cs.kind) kv.push(['Now', { DIS: 'Discharging', RST: 'Restows', LOAD: 'Loading', STOP: 'Stopped' }[cs.kind]]); }
-      const d = DISRUPTIONS.find((x) => t >= x.start && t < x.end && (x.cranes === 'ALL' || x.cranes.includes(s.id))); if (d) story = `${d.title}. ${d.detail}`;
-      if (k.idle) story = 'Western part of the Amazonehaven quay. Not modelled, so it takes no vessel in this simulation.';
+      const d = DISRUPTIONS.find((x) => x.port === k.port && t >= x.start && t < x.end && (x.cranes === 'ALL' || x.cranes.includes(s.id))); if (d) story = `${d.title}. ${d.detail}`;
+      if (k.idle) story = k.note || '';
       sig = `c${s.id}|${Math.floor(cs.m)}|${cs.state}`;
     } else if (s.kind === 'agv') {
       const a = agvState[s.id]; title = s.id >= N_AGV ? `Straddle carrier ${s.id - N_AGV + 1}` : `AGV ${String(s.id + 1).padStart(2, '0')}`; eyebrow = s.id >= N_AGV ? 'Feeder terminal transport' : 'Automated guided vehicle';
       kv.push(['Serving', a?.crane || 'n/a'], ['Vessel', a?.call ? CALL[a.call].name : 'n/a'], ['Load', a?.carry ? 'Carrying a container' : 'Empty'], ['State', a?.parked ? 'Parked' : a?.stopped ? 'Holding, crane stopped' : a?.moving ? 'Driving' : 'At handover']);
       sig = `a${s.id}|${a?.carry}|${a?.moving}|${a?.stopped}`;
+    } else if (s.kind === 'sc') {
+      const a = scState[s.id]; title = `Straddle carrier ${String(s.id + 1).padStart(2, '0')}`; eyebrow = 'MPET quay and yard transport';
+      kv.push(['Serving', a?.crane || 'n/a'], ['Vessel', a?.call ? CALL[a.call].name : 'n/a'], ['Load', a?.carry ? 'Carrying a container' : 'Empty'], ['State', a?.parked ? 'Parked' : a?.stopped ? 'Holding, crane stopped' : a?.moving ? 'Driving' : 'At handover']);
+      story = 'Picks a container from under the crane and sets it down in a row in the yard. Straddle carriers at MPET are an assumption of this model.';
+      sig = `sc${s.id}|${a?.carry}|${a?.moving}|${a?.stopped}`;
     } else if (s.kind === 'tug') {
-      const tg = tugs[s.id]; title = `Tug ${s.id.slice(1)}`; eyebrow = PARTIES.TUG.name; kv.push(['Now', tg.pose?.st || 'At base']);
+      const tg = tugs[s.id]; title = `Tug ${s.id.slice(1)}`; eyebrow = PARTIES[PORTS[tg.port].parties.tug].name; kv.push(['Now', tg.pose?.st || 'At base']);
       const jobs = S.tugJobs.filter((j) => j.tugs.includes(s.id) && j.t0 >= -60 && j.t0 <= WINDOW); kv.push(['Jobs in window', String(jobs.length)]);
       jobs.forEach((j) => kv.push([`${dayTime(j.tMeet)}`, `${CALL[j.call].name} ${j.phase === 'INBD' ? 'inbound' : 'outbound'}`]));
       sig = `t${s.id}|${tg.pose?.st}`;
     } else if (s.kind === 'heli') { title = 'Pilot helicopter'; eyebrow = PARTIES.PILOT.name; kv.push(['Now', heli.pose?.st]); S.heli.filter((f) => f.t1 >= -60 && f.t1 <= WINDOW).forEach((f) => kv.push([dayTime(f.t1), `${f.kind === 'board' ? 'Pilot boards' : 'Pilot leaves'} ${CALL[f.call].name}`])); story = 'Deep-draught vessels take their pilot by helicopter before the Eurogeul.'; sig = `h|${heli.pose?.st}`; }
-    else if (s.kind === 'tender') { title = 'Pilot tender'; eyebrow = PARTIES.PILOT.name; kv.push(['Now', tender.pose?.st]); S.tender.filter((f) => f.t1 >= -60 && f.t1 <= WINDOW).forEach((f) => kv.push([dayTime(f.t1), `${f.kind === 'board' ? 'Pilot boards' : 'Pilot leaves'} ${CALL[f.call].name}`])); sig = `p|${tender.pose?.st}`; }
-    else if (s.kind === 'moor') { title = `Mooring crew ${s.id.slice(1)}`; eyebrow = PARTIES.MOOR.name; kv.push(['Now', krve[s.id].pose?.st], ['Crew', 'Boat with 2 boatmen, 4 linesmen ashore']); S.moorJobs.filter((j) => j.crew === s.id && j.t0 >= -60 && j.t0 <= WINDOW).forEach((j) => kv.push([dayTime(j.t0), `${j.phase === 'INBD' ? 'Mooring' : 'Unmooring'} ${CALL[j.call].name}`])); sig = `m${s.id}|${krve[s.id].pose?.st}`; }
+    else if (s.kind === 'tender') {
+      const td = s.id === 'VLI' ? vliss : tenders[s.id]; const port = s.id === 'VLI' ? 'ANR' : s.id;
+      title = s.id === 'RTM' ? 'Pilot tender' : s.id === 'ANR' ? 'Pilot boat (SWATH)' : 'Pilot boat, Vlissingen'; eyebrow = PARTIES[PORTS[port].parties.pilot].name; kv.push(['Now', td.pose?.st]);
+      (s.id === 'VLI' ? pilotSwaps : S.tender.filter((f) => f.port === port)).filter((f) => f.t1 >= -60 && f.t1 <= WINDOW).forEach((f) => kv.push([dayTime(f.t1), `${f.kind === 'board' ? 'Pilot boards' : f.kind === 'swap' ? 'Pilot change on' : 'Pilot leaves'} ${CALL[f.call].name}`]));
+      if (s.id === 'ANR') story = 'Pilots for the Scheldt board at the Wandelaar station from a SWATH pilot boat or tender.';
+      if (s.id === 'VLI') story = 'Off Vlissingen the river pilot takes over from the sea pilot for the run up the Scheldt.';
+      sig = `p${s.id}|${td.pose?.st}`;
+    }
+    else if (s.kind === 'moor') { title = `Mooring crew ${s.id.slice(1)}`; eyebrow = PARTIES[PORTS[krve[s.id].port].parties.moor].name; kv.push(['Now', krve[s.id].pose?.st], ['Crew', 'Boat with 2 boatmen, 4 linesmen ashore']); S.moorJobs.filter((j) => j.crew === s.id && j.t0 >= -60 && j.t0 <= WINDOW).forEach((j) => kv.push([dayTime(j.t0), `${j.phase === 'INBD' ? 'Mooring' : 'Unmooring'} ${CALL[j.call].name}`])); sig = `m${s.id}|${krve[s.id].pose?.st}`; }
     else if (s.kind === 'bunker') { title = 'Bunker barge'; eyebrow = PARTIES.BUNK.name; kv.push(['Now', bunkerV.pose?.st]); const j = S.bunker[0]; if (j) { const done = clamp((t - j.start) / (j.end - j.start), 0, 1) * j.qty; kv.push(['Job', `${CALL[j.call].name}, ${dayTime(j.start)} to ${hhmm(j.end)}`], ['Transferred', `${fmtN(done)} of ${fmtN(j.qty)} t ${j.product}`]); } story = 'Barge-to-ship bunkering on the water side while cranes work the other side.'; sig = `b|${bunkerV.pose?.st}|${Math.floor(t)}`; }
     else if (s.kind === 'sludge') { title = 'Sludge barge'; eyebrow = PARTIES.SLDG.name; kv.push(['Now', sludgeV.pose?.st]); S.sludge.forEach((j) => kv.push([dayTime(j.start), CALL[j.call].name])); sig = `s|${sludgeV.pose?.st}`; }
     if (!force && sig === cardSig) return;
@@ -873,18 +1079,18 @@
       const A = S.times[c.id]; const tr = S.tracks[c.id]; const segs = [];
       const seg = (a, b, cls) => { if (a === undefined || b === undefined) return; const x0 = clamp(a, 0, WINDOW), x1 = clamp(b, 0, WINDOW); if (x1 <= x0) return; segs.push(`<i class="seg ${cls}" style="left:${pct(x0)};width:${((x1 - x0) / WINDOW) * 100}%"></i>`); };
       const firstStop = A['ANCHORAGE|ARRI|'] ?? A['SEA_PASSAGE|CMPL|INBD'];
-      seg(tr[0].t, firstStop, 'sea');
+      seg(c.prevCall ? S.times[c.prevCall]['SEA_PASSAGE|STRT|OUTB'] : tr[0].t, firstStop, 'sea');
       if (A['ANCHORAGE|ARRI|'] !== undefined) { seg(A['ANCHORAGE|ARRI|'], A['ANCHORAGE|DEPA|'], 'anch'); seg(A['ANCHORAGE|DEPA|'], A['SEA_PASSAGE|CMPL|INBD'], 'sea'); }
       seg(A['SEA_PASSAGE|CMPL|INBD'], A['ALL_FAST||ALGS'], 'naut');
       seg(A['ALL_FAST||ALGS'], A['BERTH|DEPA|OUTB'], 'berth');
       seg(A['CARGO_OPERATIONS|STRT|ALGS'], A['CARGO_OPERATIONS|CMPL|ALGS'], 'cargo');
-      for (const d of DISRUPTIONS) if (c.cranes.some((k) => d.cranes === 'ALL' || d.cranes.includes(k))) seg(Math.max(d.start, A['CARGO_OPERATIONS|STRT|ALGS']), Math.min(d.end, A['CARGO_OPERATIONS|CMPL|ALGS']), 'stop');
+      for (const d of DISRUPTIONS) if (d.port === c.port && c.cranes.some((k) => d.cranes === 'ALL' || d.cranes.includes(k))) seg(Math.max(d.start, A['CARGO_OPERATIONS|STRT|ALGS']), Math.min(d.end, A['CARGO_OPERATIONS|CMPL|ALGS']), 'stop');
       seg(A['BERTH|DEPA|OUTB'], A['SEA_PASSAGE|STRT|OUTB'], 'naut');
       seg(A['SEA_PASSAGE|STRT|OUTB'], tr[tr.length - 1].t, 'sea');
       let marks = '';
       if (c.pta >= 0 && c.pta <= WINDOW) marks += `<i class="mark" style="left:${pct(c.pta)}" title="PTA berth ${hhmm(c.pta)}"></i>`;
       if (c.jit && c.jit.etaUnconstrained >= 0) marks += `<i class="mark etau" style="left:${pct(c.jit.etaUnconstrained)}" title="ETA at full speed ${hhmm(c.jit.etaUnconstrained)}"></i>`;
-      h += `<div class="g-row"><button type="button" class="g-name" data-call="${c.id}">${esc(c.name)}</button><div class="g-track" data-track>${segs.join('')}${marks}</div></div>`;
+      h += `<div class="g-row"><button type="button" class="g-name" data-call="${c.id}">${c.port !== 'RTM' ? `<span class="g-port">${c.port}</span>` : ''}${esc(c.name)}</button><div class="g-track" data-track>${segs.join('')}${marks}</div></div>`;
     }
     h += '<div class="g-area" id="g-area">';
     for (const d of DISRUPTIONS) h += `<i class="g-dis" style="left:${pct(d.start)};width:${((d.end - d.start) / WINDOW) * 100}%"></i>`;
@@ -903,15 +1109,16 @@
   gantt.addEventListener('click', (e) => { const b = e.target.closest('.g-name'); if (b) { select({ kind: 'vessel', id: b.dataset.call }); if (vesselPos[b.dataset.call]) { state.follow = false; setView(viewFor(vesselPos[b.dataset.call])); } } });
 
   const momentsEl = $('moments');
-  momentsEl.innerHTML = MOMENTS.map((m, i) => `<button type="button" data-i="${i}"><span>${SIM.dayName(m.t).slice(0, 2)} ${hhmm(m.t)}</span>${esc(m.label)}</button>`).join('');
+  momentsEl.innerHTML = MOMENTS.map((m, i) => `<button type="button" data-i="${i}"${m.port && m.port !== 'RTM' ? ' class="next"' : ''}><span>${SIM.dayName(m.t).slice(0, 2)} ${hhmm(m.t)}</span>${esc(m.label)}</button>`).join('');
   momentsEl.addEventListener('click', (e) => {
     const b = e.target.closest('button'); if (!b) return; const m = MOMENTS[+b.dataset.i];
-    state.t = m.t; select(m.sel);
-    if (m.view === 'follow') { state.follow = true; updateScene(state.t, 0); const p = vesselPos[m.sel]; if (p) fly = { t0: performance.now(), dur: 1100, fromT: controls.target.clone(), toT: new THREE.Vector3(p.x, 0, p.z), fromP: camera.position.clone(), toP: new THREE.Vector3(p.x - 1500, 1100, p.z + 1300) }; state.view = 'follow'; document.querySelectorAll('#views button').forEach((x) => x.setAttribute('aria-pressed', 'false')); }
-    else { updateScene(state.t, 0); setView(m.view); }
+    state.t = m.t; setPort(m.port || 'RTM'); select(m.sel);
+    if (m.view === 'follow') { const k = m.far || 1; state.follow = true; updateScene(state.t, 0); const p = vesselPos[m.sel]; if (p) fly = { t0: performance.now(), dur: 1100, fromT: controls.target.clone(), toT: new THREE.Vector3(p.x, 0, p.z), fromP: camera.position.clone(), toP: new THREE.Vector3(p.x - 1500 * k, 1100 * k, p.z + 1300 * k) }; state.view = 'follow'; document.querySelectorAll('#views button').forEach((x) => x.setAttribute('aria-pressed', 'false')); }
+    else { state.follow = false; updateScene(state.t, 0); setView(m.view); }
     if (!state.playing) togglePlay(); cardSig = ''; uiDirty = true;
   });
   document.querySelectorAll('#views button').forEach((b) => b.addEventListener('click', () => { state.follow = false; cardSig = ''; setView(b.dataset.view); }));
+  document.querySelectorAll('#ports button').forEach((b) => b.addEventListener('click', () => { if (setPort(b.dataset.port)) { cardSig = ''; renderCard(true); } }));
   document.querySelectorAll('.speed button').forEach((b) => b.addEventListener('click', () => { state.speed = +b.dataset.speed; document.querySelectorAll('.speed button').forEach((x) => x.setAttribute('aria-pressed', String(x === b))); }));
   const playBtn = $('play');
   const ICON_PLAY = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2.5v11l9-5.5z"/></svg>', ICON_PAUSE = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 2.5h3v11h-3zM9.5 2.5h3v11h-3z"/></svg>';
@@ -933,84 +1140,111 @@
     $('clock-d').textContent = SIM.longDate(t); $('clock-t').textContent = hhmm(t);
     $('g-ph').style.left = pct(t);
     gantt.querySelectorAll('.g-name').forEach((b) => b.classList.toggle('sel', state.sel?.kind === 'vessel' && state.sel.id === b.dataset.call));
+    const port = state.port; const PC = CALLS.filter((c) => c.port === port);
     // vessel labels + list
     let inPort = 0;
     for (const c of ORDERED) {
       const st = callStatus(c, t); const row = vlist.querySelector(`[data-call="${c.id}"]`);
-      if (!['exp', 'gone'].includes(st.code)) inPort++;
+      vLabels[c.id].e.querySelector('small').textContent = st.label;
+      if (c.port !== port) continue;
+      if (!['exp', 'gone', 'prev'].includes(st.code)) inPort++;
       const pill = row.querySelector('.pill'); pill.className = 'pill ' + st.cls; pill.textContent = st.label;
-      row.querySelector('.s').textContent = `${PARTIES[c.carrier].name} · ${c.serviceName}`;
+      row.querySelector('.s').textContent = c.prevCall ? `${PARTIES[c.carrier].name} · ${c.serviceName} · from ${PORTS[CALL[c.prevCall].port].name}` : `${PARTIES[c.carrier].name} · ${c.serviceName}`;
       const nx = nextEvent(c, t); row.querySelector('.nx').textContent = nx ? `${codeName(nx.key, nx.cls)} ${cellTime(nx.value, t)}` : '';
       const pr = st.code === 'cargo' || st.code === 'stop' ? st.pct : ['sail', 'out', 'gone'].includes(st.code) ? 100 : 0;
       const bar = row.querySelector('.bar i'); bar.style.width = pr + '%'; bar.style.background = st.code === 'stop' ? 'var(--crit)' : '';
       row.classList.toggle('sel', state.sel?.kind === 'vessel' && state.sel.id === c.id);
-      vLabels[c.id].e.querySelector('small').textContent = st.label;
     }
+    if (ghost) { const st = callStatus(NEXT, t); ghost.e.querySelector('small').textContent = st.code === 'prev' ? `${st.label} · next port Antwerp` : st.label; }
     $('v-meta').textContent = `${inPort} in the port call now`;
     // JIT panel
-    const dayStart = Math.floor(t / 1440) * 1440; const n = sentCount(t); const n0 = sentCount(t - 1440);
+    const dayStart = Math.floor(t / 1440) * 1440; const ML = MSG_PORT[port]; const n = countTo(ML, t); const n0 = countTo(ML, t - 1440);
     $('j-sent').textContent = fmtN(n - n0);
     let open = 0;
-    for (const c of CALLS) for (const k in msgsBy[c.id]) { if (!SVC[parseKey(k).type].neg) continue; const m = latest(c.id, k, null, t); if (m && (m.cls === 'EST' || m.cls === 'REQ')) open++; }
+    for (const c of PC) for (const k in msgsBy[c.id]) { if (!SVC[parseKey(k).type].neg) continue; const m = latest(c.id, k, null, t); if (m && (m.cls === 'EST' || m.cls === 'REQ')) open++; }
     $('j-open').textContent = open;
-    let lastArr = null; for (const c of CALLS) { const m = latest(c.id, 'BERTH|ARRI|INBD', 'ACT', t); if (m && (!lastArr || m.value > lastArr.m.value)) lastArr = { c, m }; }
+    let lastArr = null; for (const c of PC) { const m = latest(c.id, 'BERTH|ARRI|INBD', 'ACT', t); if (m && (!lastArr || m.value > lastArr.m.value)) lastArr = { c, m }; }
     if (lastArr) { const p = latest(lastArr.c.id, 'BERTH|ARRI|INBD', 'PLN', lastArr.m.sendAt); const d = Math.round(lastArr.m.value - (p ? p.value : lastArr.c.pta)); $('j-acc').innerHTML = `${d > 0 ? '+' : ''}${d}<small>min</small>`; $('j-acc-k').textContent = `ATA vs PTA · ${lastArr.c.name}`; }
-    const counts = { EST: 0, REQ: 0, PLN: 0, ACT: 0 }; for (let i = n0; i < n; i++) counts[S.messages[i].cls]++;
+    else { $('j-acc').innerHTML = '<small>n/a</small>'; $('j-acc-k').textContent = 'last ATA vs PTA'; }
+    const counts = { EST: 0, REQ: 0, PLN: 0, ACT: 0 }; for (let i = n0; i < n; i++) counts[ML[i].cls]++;
     const tot = Math.max(1, n - n0);
     $('j-bar').innerHTML = ['EST', 'REQ', 'PLN', 'ACT'].map((k) => `<i style="width:${(counts[k] / tot) * 100}%;background:var(--${k[0].toLowerCase()})"></i>`).join('');
     $('j-legend').innerHTML = [['EST', 'Estimated'], ['REQ', 'Requested'], ['PLN', 'Planned'], ['ACT', 'Actual']].map(([k, l]) => `<span><i style="background:var(--${k[0].toLowerCase()})"></i>${l} ${counts[k]}</span>`).join('');
-    const bw = S.anchorWait.BW; const bwSoFar = clamp(t - bw.from, 0, bw.to - bw.from);
-    $('j-out').innerHTML = `<div class="outcome good"><div class="v">${hrs(S.outcomes.IR.anchorAvoided)} h</div><div class="k">at anchor avoided. ${esc(CALL.IR.name)} slowed to ${CALL.IR.jit.speedJit} kn after the terminal requested 14:00.</div></div>
-      <div class="outcome warn"><div class="v">${hrs(bwSoFar)} h</div><div class="k">at anchor${bwSoFar < bw.to - bw.from ? ' so far' : ''}. Baltic Wren sent its first estimate 5 h out.</div></div>`;
-    // quay: the modelled part of the Amazonehaven quay (left) and the feeder terminal (right)
+    if (port === 'RTM') {
+      const bw = S.anchorWait.BW; const bwSoFar = clamp(t - bw.from, 0, bw.to - bw.from);
+      $('j-out').innerHTML = `<div class="outcome good"><div class="v">${hrs(S.outcomes.IR.anchorAvoided)} h</div><div class="k">at anchor avoided. ${esc(CALL.IR.name)} slowed to ${CALL.IR.jit.speedJit} kn after the terminal requested 14:00.</div></div>
+        <div class="outcome warn"><div class="v">${hrs(bwSoFar)} h</div><div class="k">at anchor${bwSoFar < bw.to - bw.from ? ' so far' : ''}. Baltic Wren sent its first estimate 5 h out.</div></div>`;
+    } else if (NEXT) {
+      // next port: the plan follows the ship's progress in the previous port and the tide in the Scheldt
+      const o = S.outcomes[NEXT.id]; const revd = firstRev && t >= firstRev.sendAt; const tw = tideNow(NEXT, t);
+      const ba = latest(NEXT.id, 'BERTH|ARRI|INBD', null, t); const sp = callStatus(PREV, t); const etd = latest(PREV.id, 'BERTH|DEPA|OUTB', null, t);
+      const prevTxt = sp.code === 'gone' || sp.code === 'out'
+        ? `${esc(PREV.name)} sailed from ${PORT_UI[PREV.port].short} ${dayTime(S.times[PREV.id]['BERTH|DEPA|OUTB'])}.`
+        : `${esc(PREV.name)} at ${PORT_UI[PREV.port].short}: ${esc(sp.label.toLowerCase())}${etd ? `, ETD ${hhmm(etd.value)}` : ''}.`;
+      $('j-out').innerHTML = `<div class="outcome ${revd ? 'warn' : 'good'}"><div class="v">${revd ? `+${hrs(o.ripple)} h` : 'On plan'}</div><div class="k">${revd ? `berth arrival at ${PORT_UI[NEXT.port].short}, from ${hrs(o.prevDelay)} h late in ${PORTS[PREV.port].name}. The tidal window was missed.` : `${PORT_UI[NEXT.port].short} plans on the ${PORTS[PREV.port].name} schedule: berth ${dayTime(NEXT.pta)}.`}</div></div>
+        <div class="outcome info"><div class="v">${tw ? `${hhmm(tw.start)}–${hhmm(tw.end)}` : 'n/a'}</div><div class="k">${SIM.dayName(tw?.start ?? 0)}: inbound tidal window at Vlissingen for ${NEXT.draftArr} m draught.</div></div>
+        <div class="outcome info wide"><div class="k">${prevTxt} ETA berth ${ba ? dayTime(ba.value) : 'n/a'}.</div></div>`;
+    }
+    // quay
     let working = 0, rate = 0; let strip = '';
-    const SEG = { Q: { s0: 1150, s1: 2380, l0: 0, l1: 76 }, F: { s0: 0, s1: QUAYS.F.len, l0: 80, l1: 100 } };
+    const SEGS = { RTM: { Q: { s0: 1150, s1: 2380, l0: 0, l1: 76 }, F: { s0: 0, s1: QUAYS.F.len, l0: 80, l1: 100 } }, ANR: { M: { s0: 0, s1: QUAYS.M.len, l0: 0, l1: 100 } } };
+    const SEG = SEGS[port];
     const zp = (q, v) => { const g = SEG[q]; return g.l0 + ((v - g.s0) / (g.s1 - g.s0)) * (g.l1 - g.l0); };
-    strip += `<i class="wall" style="left:0;right:24%"></i><i class="wall" style="left:80%;right:0"></i><span class="zone" style="left:0">Amazonehaven</span><span class="zone" style="left:80%">DBFT</span>`;
-    for (const c of CALLS) {
+    strip += port === 'RTM'
+      ? `<i class="wall" style="left:0;right:24%"></i><i class="wall" style="left:80%;right:0"></i><span class="zone" style="left:0">Amazonehaven</span><span class="zone" style="left:80%">DBFT</span>`
+      : `<i class="wall" style="left:0;right:0"></i><span class="zone" style="left:0">Deurganckdok · inner end</span><span class="zone" style="right:0">Scheldt</span>`;
+    for (const c of PC) {
       const p = vesselPos[c.id]; const bi = S.info[c.id]; if (!p || Math.hypot(p.x - bi.pos[0], p.z - bi.pos[1]) > 260) continue;
       const g = SEG[bi.q]; const w = ((c.loa / (g.s1 - g.s0)) * (g.l1 - g.l0));
       strip += `<i class="ship${c.size === 'FEEDER' ? ' feeder' : ''}" style="left:${zp(bi.q, bi.sc) - w / 2}%;width:${w}%" title="${esc(c.name)}"></i>`;
     }
     let nCr = 0;
-    for (const k of CRANES) { if (k.idle) continue; nCr++; const cs = craneAt(k.id, t); if (cs.state === 'work') { working++; rate += cs.a.rate; } strip += `<i class="cr ${cs.state === 'work' ? 'work' : cs.state === 'stop' ? 'stop' : ''}" style="left:${zp(k.q, cs.z)}%" title="${k.id}"></i>`; }
+    for (const k of CRANES) { if (k.idle || k.port !== port) continue; nCr++; const cs = craneAt(k.id, t); if (cs.state === 'work') { working++; rate += cs.a.rate; } strip += `<i class="cr ${cs.state === 'work' ? 'work' : cs.state === 'stop' ? 'stop' : ''}" style="left:${zp(k.q, cs.z)}%" title="${k.id}"></i>`; }
     $('q-strip').innerHTML = strip;
     $('q-cranes').innerHTML = `${working}<small>/ ${nCr}</small>`;
     $('q-rate').textContent = fmtN(rate);
-    $('q-moves').textContent = fmtN(cumMoves(t) - cumMoves(dayStart));
-    $('q-meta').textContent = '11 ULCS cranes · 3 feeder cranes';
+    $('q-moves').textContent = fmtN(cumMoves(t, port) - cumMoves(dayStart, port));
+    $('q-meta').textContent = port === 'RTM' ? '11 ULCS cranes · 3 feeder cranes' : `${nCr} cranes on the modelled berth`;
+    const hourly = hourlyP[port];
     const hNow = Math.floor((t - HB0) / 60); let sp = ''; let mx = 1; for (let i = hNow - 23; i <= hNow; i++) mx = Math.max(mx, hourly[i] || 0);
-    for (let i = hNow - 23; i <= hNow; i++) { let v = hourly[i] || 0; if (i === hNow) v = cumMoves(t) - cumMoves(HB0 + i * 60); sp += `<i class="${i === hNow ? 'now' : ''}" style="height:${(v / mx) * 100}%" title="${hhmm(HB0 + i * 60)} · ${fmtN(v)} moves"></i>`; }
+    for (let i = hNow - 23; i <= hNow; i++) { let v = hourly[i] || 0; if (i === hNow) v = cumMoves(t, port) - cumMoves(HB0 + i * 60, port); sp += `<i class="${i === hNow ? 'now' : ''}" style="height:${(v / mx) * 100}%" title="${hhmm(HB0 + i * 60)} · ${fmtN(v)} moves"></i>`; }
     $('q-spark').innerHTML = sp;
     // nautical
-    const tugBusy = Object.values(tugs).map((tg) => tg.pose?.job ? (t >= tg.pose.job.tMeet && t <= tg.pose.job.tRelease ? 'tow' : 'busy') : '');
+    const tugBusy = TUG_IDS[port].map((id) => { const tg = tugs[id]; return tg.pose?.job ? (t >= tg.pose.job.tMeet && t <= tg.pose.job.tRelease ? 'tow' : 'busy') : ''; });
     const nTow = tugBusy.filter((x) => x === 'tow').length, nBusy = tugBusy.filter(Boolean).length;
-    const pobs = S.pilotOnBoard.filter((p) => t >= p.from && t <= p.to);
-    const moorNow = S.moorJobs.filter((j) => t >= j.t0 && t <= j.t1);
+    const pobs = S.pilotOnBoard.filter((p) => p.port === port && t >= p.from && t <= p.to);
+    const moorNow = S.moorJobs.filter((j) => j.port === port && t >= j.t0 && t <= j.t1);
+    const nMoor = MOOR_IDS[port].length;
+    const muted = (x) => `<span style="color:var(--muted)">${x}</span>`;
     const rows = [
-      ['Tugs', `<div class="cells">${tugBusy.map((x) => `<i class="${x}"></i>`).join('')}</div><div style="font-size:11.5px;color:var(--muted);margin-top:3px">${nTow} towing · ${nBusy - nTow} in transit · ${8 - nBusy} at base</div>`],
-      ['Pilots on board', pobs.length ? pobs.map((p) => `${esc(CALL[p.call].name)} <span style="color:var(--muted)">${p.phase === 'INBD' ? 'inbound' : 'outbound'}</span>`).join('<br>') : '<span style="color:var(--muted)">None</span>'],
-      ['Helicopter', esc(heli.pose?.st || 'On the pad')],
-      ['Pilot tender', esc(tender.pose?.st || '')],
-      ['Mooring crews', moorNow.length ? moorNow.map((j) => `${j.phase === 'INBD' ? 'Mooring' : 'Unmooring'} ${esc(CALL[j.call].name)}`).join('<br>') : '<span style="color:var(--muted)">3 of 3 available</span>'],
-      ['Bunkering', esc(bunkerV.pose?.st || 'Waiting')],
+      ['Tugs', `<div class="cells">${tugBusy.map((x) => `<i class="${x}"></i>`).join('')}</div><div style="font-size:11.5px;color:var(--muted);margin-top:3px">${nTow} towing · ${nBusy - nTow} in transit · ${tugBusy.length - nBusy} at base</div>`],
+      ['Pilots on board', pobs.length ? pobs.map((p) => `${esc(CALL[p.call].name)} ${muted(p.phase === 'INBD' ? (port === 'ANR' && S.pilotChange[p.call] ? (t < S.pilotChange[p.call] ? 'sea pilot, inbound' : 'river pilot, inbound') : 'inbound') : 'outbound')}`).join('<br>') : muted('None')],
+      ...(port === 'RTM' ? [['Helicopter', esc(heli.pose?.st || 'On the pad')], ['Pilot tender', esc(tender.pose?.st || '')]]
+        : [['Pilot boat, Wandelaar', esc(tenders.ANR.pose?.st || '')], ['Pilot boat, Vlissingen', esc(vliss.pose?.st || '')]]),
+      ['Mooring crews', moorNow.length ? moorNow.map((j) => `${j.phase === 'INBD' ? 'Mooring' : 'Unmooring'} ${esc(CALL[j.call].name)}`).join('<br>') : muted(`${nMoor} of ${nMoor} available`)],
+      ...(port === 'RTM' ? [['Bunkering', esc(bunkerV.pose?.st || 'Waiting')]] : [['Next tidal window', (() => { const w = SIM.tideSlot(GEO_ANR.TIDE, t); return `Vlissingen ${t >= w.start ? 'now until' : cellTime(w.start, t) + '–'}${hhmm(w.end)} ${muted('HW ' + hhmm(w.hw))}`; })()]]),
     ];
     $('n-rows').innerHTML = rows.map(([k, v]) => `<div><span class="k">${k}</span><span>${v}</span></div>`).join('');
     // people
-    const cranesStaffed = CRANES.filter((k) => ['work', 'stop'].includes(craneAt(k.id, t).state)).length;
-    let lashers = 0; for (const c of CALLS) { const A = S.times[c.id]; const s0 = A['CARGO_OPERATIONS|STRT|ALGS'], s1 = A['CARGO_OPERATIONS|CMPL|ALGS'], s2 = A['LASHING|CMPL|ALGS']; if ((t >= s0 - 20 && t < s0 + 90) || (t >= s1 - 120 && t < s2)) lashers += c.size === 'ULCV' ? 14 : 6; else if (t >= s0 && t < s1) lashers += c.size === 'ULCV' ? 4 : 2; }
-    const ppl = [['Pilots on board', pobs.length], ['Tug crews', nBusy * 4], ['KRVE boatmen and linesmen', moorNow.length * 6], ['Lashers on deck', lashers], ['Remote crane operators', cranesStaffed], ['Helicopter crew', heli.pose?.fly ? 2 : 0], ['Bunker vessel crew', bunkerV.pose?.job ? 7 : 0]];
+    const cranesStaffed = CRANES.filter((k) => k.port === port && ['work', 'stop'].includes(craneAt(k.id, t).state)).length;
+    let lashers = 0; for (const c of PC) { const A = S.times[c.id]; const s0 = A['CARGO_OPERATIONS|STRT|ALGS'], s1 = A['CARGO_OPERATIONS|CMPL|ALGS'], s2 = A['LASHING|CMPL|ALGS']; if ((t >= s0 - 20 && t < s0 + 90) || (t >= s1 - 120 && t < s2)) lashers += c.size === 'ULCV' ? 14 : 6; else if (t >= s0 && t < s1) lashers += c.size === 'ULCV' ? 4 : 2; }
+    const ppl = port === 'RTM'
+      ? [['Pilots on board', pobs.length], ['Tug crews', nBusy * 4], ['KRVE boatmen and linesmen', moorNow.length * 6], ['Lashers on deck', lashers], ['Remote crane operators', cranesStaffed], ['Helicopter crew', heli.pose?.fly ? 2 : 0], ['Bunker vessel crew', bunkerV.pose?.job ? 7 : 0]]
+      : [['Pilots on board', pobs.length], ['Tug crews', nBusy * 4], ['Boatmen and linesmen', moorNow.length * 6], ['Lashers on deck', lashers], ['Crane drivers', cranesStaffed], ['Straddle carrier drivers', scState.filter((a) => a && !a.parked).length], ['Pilot boat crews', (tenders.ANR.pose?.st || '').startsWith('On station') ? 0 : 3]];
     const totalP = ppl.reduce((s, x) => s + x[1], 0);
     $('pp-meta').textContent = `${totalP} on port call services`;
     $('pp-rows').innerHTML = ppl.map(([k, v]) => `<div><span class="k">${k}</span><span class="mono">${v}</span></div>`).join('');
-    // alerts
-    $('alerts').innerHTML = ALERTS.filter((a) => a.t <= t).slice(0, 6).map((a) => `<div class="alert ${a.sev}${a.end && t < a.end ? ' active' : ''}"><div class="h">${esc(a.title)}<span>${SIM.dayName(a.t).slice(0, 2)} ${hhmm(a.t)}</span></div><p>${esc(a.text)}</p></div>`).join('') || '<p class="story">No alerts yet.</p>';
-    // feed
-    const fs = `${n}|${Math.floor(t / 5)}`;
+    // alerts for this port, and alerts from another port that matter here
+    $('alerts').innerHTML = ALERTS.filter((a) => a.t <= t && (a.port === port || a.also?.includes(port))).slice(0, 6).map((a) => `<div class="alert ${a.sev}${a.end && t < a.end ? ' active' : ''}"><div class="h">${a.port !== port ? `${PORTS[a.port].name}: ` : ''}${esc(a.title)}<span>${SIM.dayName(a.t).slice(0, 2)} ${hhmm(a.t)}</span></div><p>${esc(a.text)}</p></div>`).join('') || '<p class="story">No alerts yet.</p>';
+    // event stream
+    const FL = FEED[port]; const nf = countTo(FL, t);
+    const fs = `${port}|${nf}|${Math.floor(t / 5)}`;
     if (fs !== feedSig) {
-      feedSig = fs; const list = S.messages.slice(Math.max(0, n - 40), n).reverse();
-      feedEl.innerHTML = list.map((m) => { const c = CALL[m.call]; return `<button type="button" data-msg="${m.id}" class="${t - m.sendAt < 15 ? 'new' : ''}"><span class="cls ${m.cls}">${m.cls[0]}</span><span class="c1"><span>${esc(codeName(m.key, m.cls))}</span> · ${esc(c.name)}</span><span class="val">${m.value != null ? cellTime(m.value, t) : m.moves ? fmtN(m.moves.dis + m.moves.load + m.moves.rst) + ' moves' : ''}</span><span class="c2">${SIM.dayName(m.sendAt).slice(0, 2)} ${hhmm(m.sendAt)} · ${SHORT[m.from]} → ${SHORT[m.to]}${m.remark ? ' · ' + esc(m.remark) : ''}</span></button>`; }).join('');
+      feedSig = fs; const list = FL.slice(Math.max(0, nf - 40), nf).reverse();
+      feedEl.innerHTML = list.map((m) => { const c = CALL[m.call]; const other = c.port !== port; return `<button type="button" data-msg="${m.id}" class="${t - m.sendAt < 15 ? 'new' : ''}${other ? ' other' : ''}"><span class="cls ${m.cls}">${m.cls[0]}</span><span class="c1"><span>${esc(codeName(m.key, m.cls))}</span> · ${esc(c.name)}${other ? ` <em class="tagp">${esc(PORTS[c.port].name)}</em>` : ''}</span><span class="val">${m.value != null ? cellTime(m.value, t) : m.moves ? fmtN(m.moves.dis + m.moves.load + m.moves.rst) + ' moves' : ''}</span><span class="c2">${SIM.dayName(m.sendAt).slice(0, 2)} ${hhmm(m.sendAt)} · ${SHORT[m.from]} → ${SHORT[m.to]}${m.remark ? ' · ' + esc(m.remark) : ''}</span></button>`; }).join('');
     }
+    // a dot on the other port's switch when it has news in the last half hour
+    for (const b of document.querySelectorAll('#ports button')) { const P = b.dataset.port; const L = FEED[P]; const k = countTo(L, t); b.classList.toggle('news', P !== port && k > 0 && t - L[k - 1].sendAt < 30); }
     renderCard(false);
   }
 
@@ -1037,14 +1271,17 @@
   }
   function start(data) {
     if (data && data.t != null) { state.t = data.t; state.speed = data.speed || state.speed; }
-    resize(); setView(data?.view && VIEWS[data.view] ? data.view : 'terminal', true);
-    if (data?.sel) select(data.sel); else if (window.innerWidth >= 900) select({ kind: 'vessel', id: 'IR' });
+    resize();
+    vlist.querySelectorAll('.vrow').forEach((r) => { r.hidden = CALL[r.dataset.call].port !== state.port; });
+    if (data?.port && data.port !== state.port) setPort(data.port);
+    setView(data?.view && VIEWS[state.port][data.view] ? data.view : 'terminal', true);
+    if (data?.sel) select(data.sel); else if (window.innerWidth >= 900) select({ kind: 'vessel', id: state.port === 'ANR' ? NEXT.id : 'IR' });
     document.querySelectorAll('.speed button').forEach((x) => x.setAttribute('aria-pressed', String(+x.dataset.speed === state.speed)));
     requestAnimationFrame((n) => { last = n; frame(n); });
   }
   // hooks for scripted recordings: refresh panels now, and find an object's position on screen
   window.__portcall = {
-    state, camera, controls, setView, select,
+    state, camera, controls, setView, select, setPort,
     refresh: () => { uiDirty = true; },
     screen: (kind, id) => {
       let p = null;
@@ -1052,6 +1289,7 @@
       else if (kind === 'vessel' && vesselPos[id]) p = new THREE.Vector3(vesselPos[id].x, 18, vesselPos[id].z);
       else if (kind === 'tug') p = tugs[id].g.position.clone();
       else if (kind === 'heli') p = heli.g.position.clone();
+      else if (kind === 'tender') p = (id === 'VLI' ? vliss : tenders[id]).g.position.clone();
       else if (kind === 'bunker') p = bunkerV.g.position.clone();
       else if (kind === 'agv') {
         // prefer an AGV out in the lanes, clear of the crane structures
@@ -1065,6 +1303,6 @@
     },
   };
   const hot = window.claude?.hot;
-  if (hot?.snapshot) hot.snapshot(() => ({ t: state.t, sel: state.sel, view: state.view, speed: state.speed }));
+  if (hot?.snapshot) hot.snapshot(() => ({ t: state.t, sel: state.sel, view: state.view, speed: state.speed, port: state.port }));
   if (hot?.ready) hot.ready(start); else start(hot?.data ?? {});
 })();

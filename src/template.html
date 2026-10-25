@@ -1,7 +1,7 @@
-<title>ECT Delta Port Calls</title>
+<title>Rotterdam Antwerp Port Calls</title>
 <meta name="claude:viewport-fit-sides" content="cover">
 <meta name="author" content="Emilio Solanes">
-<meta name="description" content="Discrete event simulation of vessel calls at Hutchison Ports ECT Delta, Rotterdam, with every port call service exchanged as DCSA Port Call 2.0 events (Estimated, Requested, Planned, Actual).">
+<meta name="description" content="Discrete event simulation of vessel calls at Hutchison Ports ECT Delta, Rotterdam, and the next call of MSC Gülsün at MSC PSA European Terminal, Antwerp, with every port call service exchanged as DCSA Port Call 2.0 events (Estimated, Requested, Planned, Actual).">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Instrument+Sans:wght@400;500;600&display=swap">
@@ -16,8 +16,12 @@
     <div id="credit">by emilio.solanes</div>
 
     <div id="brand" class="hud">
-      <div class="eyebrow">Hutchison Ports ECT Delta · Rotterdam</div>
+      <div class="eyebrow" id="brand-eyebrow">Hutchison Ports ECT Delta · Rotterdam</div>
       <h1>Port call ops</h1>
+      <div id="ports" role="group" aria-label="Port">
+        <button type="button" data-port="RTM" aria-pressed="true">Rotterdam<small>ECT Delta</small></button>
+        <button type="button" data-port="ANR" aria-pressed="false">Antwerp<small>MPET · next port</small></button>
+      </div>
       <div id="clock"><span class="d" id="clock-d">Tue 20 Oct</span><span class="t" id="clock-t">10:20</span></div>
       <div class="tag"><i></i>Simulated · DCSA Port Call 2.0 events</div>
     </div>
@@ -109,20 +113,24 @@
       <details class="about">
         <summary>About this model</summary>
         <p>Personal project by emilio.solanes. Not affiliated with or endorsed by the companies mentioned.</p>
-        <p>A discrete event simulation of 48 hours at Hutchison Ports ECT Delta on Maasvlakte I. Vessels, pilots, the pilot helicopter, tugs, mooring crews, quay cranes, AGVs and stacking cranes share one event engine. The engine runs once per disruption, so every revised estimate comes from the same model as the actuals.</p>
+        <p>A discrete event simulation of 48 hours at Hutchison Ports ECT Delta on Maasvlakte I, and of the next call of MSC Gülsün at MSC PSA European Terminal (MPET) in Antwerp. Vessels, pilots, the pilot helicopter and pilot boats, tugs, mooring crews, quay cranes, AGVs, straddle carriers and stacking cranes share one event engine. The engine runs once per disruption, so every revised estimate comes from the same model as the actuals.</p>
         <ul>
           <li>Service codes, event types (ARRI, DEPA, STRT, CMPL), phases (INBD, ALGS, OUTB) and classifiers (EST, REQ, PLN, ACT) follow DCSA Port Call 2.0. Senders and receivers follow its use cases.</li>
-          <li>MSC Gülsün and MSC Irina are real MSC vessels; Lion and Britannia are MSC services that call Rotterdam. Their particulars are public. Which terminal and berth they use, schedules, voyages, moves and all timestamps are simulated.</li>
+          <li>MSC Gülsün and MSC Irina are real MSC vessels; Lion and Britannia are MSC services that call Rotterdam. Their particulars are public. Which terminals and berths they use, the Rotterdam to Antwerp leg, schedules, voyages, moves and all timestamps are simulated.</li>
           <li>Feeders Nordic Tern, Humber Gull, Baltic Wren and Kattegat Eider are fictional.</li>
-          <li>The map is drawn from OpenStreetMap: in through the Maasmond, down the Beerkanaal, swing in the turning basin and astern into the Amazonehaven. The view is rotated so the quay runs across the screen, and offshore distances along the Maasgeul are compressed. Deep-draught vessels take the pilot by helicopter before the Eurogeul; others board at Maascenter.</li>
+          <li>Rotterdam map from OpenStreetMap: in through the Maasmond, down the Beerkanaal, swing in the turning basin and astern into the Amazonehaven. The view is rotated so the quay runs across the screen, and offshore distances along the Maasgeul are compressed. Deep-draught vessels take the pilot by helicopter before the Eurogeul; others board at Maascenter.</li>
           <li>ECT Delta as Hutchison Ports publishes it: 272 ha and 4.0 km of quay on the Europahaven and Amazonehaven, 16.65 m water depth, separate feeder and barge facilities, two rail terminals. The stacking crane blocks are drawn where OpenStreetMap maps their rails.</li>
           <li>The ULCS quay on the Amazonehaven gets 11 remote-operated cranes: 8 delivered in 2014 and 2015 and 3 in 2025. Crane count per quay, 23 gross moves per hour, 6 AGVs per crane and the 3 cranes at the Delta Barge Feeder Terminal are assumptions. The western end of the quay is shown but not modelled.</li>
+          <li>Next port: switch to Antwerp to follow MSC Gülsün's next call while it is still in Rotterdam. Its plan comes from the Rotterdam schedule. When something changes in Rotterdam, the carrier re-plans and the Antwerp parties receive revised events: terminal, harbour master, pilots, tugs and linesmen.</li>
+          <li>The Q03 hoist fault makes MSC Gülsün sail one hour late. At 15.3 m draught it needs the inbound tidal window in the Scheldt, misses one and berths about 10 hours later. The tide is simplified: high water every 12 h 25 min, and an inbound window at Vlissingen from 2.5 h before to 30 min after high water for ships deeper than 14.5 m.</li>
+          <li>Antwerp map: the Scheldt, the Deurganckdok and its terminals from OpenStreetMap; the Westerschelde and the North Sea coast are schematic, at real distances. The sea pilot boards at the Wandelaar and the river pilot takes over off Vlissingen. Tugs make fast on the Scheldt; the ship swings in front of the dock and goes astern to its berth. Tug and boatmen standby places are schematic.</li>
+          <li>MPET as PSA publishes it: 3,700 m of quay, 38 quay cranes, 247 ha, 17 m water depth, a joint venture of PSA and TIL. The model draws 24 cranes on the west quay of the Deurganckdok and works 6 on MSC Gülsün at 25 moves per hour. Straddle carriers, 4 per crane, are an assumption. Antwerp Gateway, across the dock, is shown and not modelled.</li>
           <li>ATA berth is first line ashore. All fast follows when mooring completes.</li>
-          <li>Scope: one terminal. The rest of the port is not modelled, so there is no competition from other terminals' calls for pilots, tugs, linesmen or the fairway. The Port of Rotterdam handled 27,384 seagoing calls in 2025.</li>
+          <li>Scope: one terminal per port. The rest of each port is not modelled, so there is no competition from other terminals' calls for pilots, tugs, linesmen or the fairway. The Port of Rotterdam handled 27,384 seagoing calls in 2025.</li>
           <li>Not modelled: SHORE_POWER, SAFETY, ANCHORAGE_OPERATIONS, shifting between berths, cancel, omit and decline.</li>
         </ul>
         <p>Map data &copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap contributors</a>, ODbL.</p>
-        <p>Sources: <a href="https://reference.dcsa.org/content/standards/releases/port-call/v2-0-0/port-call-v2-0-0-use-cases" target="_blank" rel="noopener">DCSA Port Call 2.0 use cases</a>, <a href="https://app.swaggerhub.com/apis/dcsaorg/DCSA_PORT_CALL/2.0.0" target="_blank" rel="noopener">Port Call 2.0 API</a>, <a href="https://www.ect.nl/en/terminals/hutchison-ports-ect-delta" target="_blank" rel="noopener">Hutchison Ports ECT Delta</a>, <a href="https://www.marinelink.com/news/terminal-receives393089" target="_blank" rel="noopener">ECT Delta cranes 2014 and 2015</a>, <a href="https://myterminal.ect.nl/news/three-new-quay-cranes-ect-delta-terminal" target="_blank" rel="noopener">ECT Delta cranes 2025</a>, <a href="https://binnenvaartkrant.nl/hutchison-helpt-msc-aan-eigen-terminal-in-rotterdam" target="_blank" rel="noopener">MSC at ECT Delta</a>, <a href="https://www.msc.com/en/newsroom/customer-advisories/2025/october/port-rotation-changes-trade-far-east-nwc" target="_blank" rel="noopener">MSC Lion and Britannia rotations</a>, <a href="https://en.wikipedia.org/wiki/G%C3%BCls%C3%BCn-class_container_ship" target="_blank" rel="noopener">MSC Gülsün</a>, <a href="https://www.themeditelegraph.com/en/shipping/shipowners/2023/03/14/news/msc_shatters_records_with_delivery_of_24346_teu_msc_irina-12693791/" target="_blank" rel="noopener">MSC Irina</a>, <a href="https://en.wikipedia.org/wiki/Maascenter" target="_blank" rel="noopener">Maascenter</a>, <a href="https://ship.energy/policy/ports/port-of-rotterdam-records-dip-in-seagoing-vessel-calls-in-2025/" target="_blank" rel="noopener">Rotterdam calls in 2025</a>.</p>
+        <p>Sources: <a href="https://reference.dcsa.org/content/standards/releases/port-call/v2-0-0/port-call-v2-0-0-use-cases" target="_blank" rel="noopener">DCSA Port Call 2.0 use cases</a>, <a href="https://app.swaggerhub.com/apis/dcsaorg/DCSA_PORT_CALL/2.0.0" target="_blank" rel="noopener">Port Call 2.0 API</a>, <a href="https://www.ect.nl/en/terminals/hutchison-ports-ect-delta" target="_blank" rel="noopener">Hutchison Ports ECT Delta</a>, <a href="https://www.marinelink.com/news/terminal-receives393089" target="_blank" rel="noopener">ECT Delta cranes 2014 and 2015</a>, <a href="https://myterminal.ect.nl/news/three-new-quay-cranes-ect-delta-terminal" target="_blank" rel="noopener">ECT Delta cranes 2025</a>, <a href="https://binnenvaartkrant.nl/hutchison-helpt-msc-aan-eigen-terminal-in-rotterdam" target="_blank" rel="noopener">MSC at ECT Delta</a>, <a href="https://www.msc.com/en/newsroom/customer-advisories/2025/october/port-rotation-changes-trade-far-east-nwc" target="_blank" rel="noopener">MSC Lion and Britannia rotations</a>, <a href="https://en.wikipedia.org/wiki/G%C3%BCls%C3%BCn-class_container_ship" target="_blank" rel="noopener">MSC Gülsün</a>, <a href="https://www.themeditelegraph.com/en/shipping/shipowners/2023/03/14/news/msc_shatters_records_with_delivery_of_24346_teu_msc_irina-12693791/" target="_blank" rel="noopener">MSC Irina</a>, <a href="https://en.wikipedia.org/wiki/Maascenter" target="_blank" rel="noopener">Maascenter</a>, <a href="https://ship.energy/policy/ports/port-of-rotterdam-records-dip-in-seagoing-vessel-calls-in-2025/" target="_blank" rel="noopener">Rotterdam calls in 2025</a>, <a href="https://www.psa-antwerp.be/en/terminals/msc-psa-european-terminal-mpet" target="_blank" rel="noopener">MPET</a>, <a href="https://www.agentschapmdk.be/en/required-boarding-arrangements-at-wandelaar-pilot-station" target="_blank" rel="noopener">Wandelaar pilot station</a>.</p>
       </details>
     </div>
   </aside>
@@ -141,10 +149,16 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
 <script>
+/*GEOSPEC*/
+</script>
+<script>
 /*SIM*/
 </script>
 <script>
 /*GEO*/
+</script>
+<script>
+/*GEOANR*/
 </script>
 <script>
 /*APP*/
