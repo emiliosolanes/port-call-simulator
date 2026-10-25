@@ -11,8 +11,10 @@ const CDN_ORBIT = '<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examp
 
 const html = read('src', 'template.html')
   .replace('/*STYLES*/', () => read('src', 'styles.css'))
+  .replace('/*GEOSPEC*/', () => read('src', 'geo-anr-spec.js'))
   .replace('/*SIM*/', () => read('src', 'sim.js'))
   .replace('/*GEO*/', () => read('src', 'geo-data.js'))
+  .replace('/*GEOANR*/', () => read('src', 'geo-anr-data.js'))
   .replace('/*APP*/', () => read('src', 'app.js'));
 if (!html.includes(CDN_THREE) || !html.includes(CDN_ORBIT)) throw new Error('three.js script tags not found in template');
 
